@@ -1,0 +1,1046 @@
+#!/usr/bin/env python3.13
+"""
+histclean.py - Zsh history cleaning utility
+
+**Architecture & Extension Guide**
+
+This document explains the core design philosophy of `histclean.py` to help you add new features easily and maintainably.
+
+**1. The Guiding Philosophy**
+
+The central idea is that **every proposed change is an object that knows how to manage itself.** We don't have a master function with lots of `if` statements. Instead, we have different types of `Flag` objects (e.g., `IndividualFlag`, `DuplicateFlag`), and each one encapsulates the logic for its specific kind of change.
+
+The main reason for this design is to make the script easy to extend. Adding a new feature should feel like adding a new, self-contained module, not like performing surgery on the core logic.
+
+**2. The Lifecycle of a Change**
+
+Any change you propose will follow this four-step journey:
+
+1.  **Strategy:** A simple function that finds things to flag (e.g., `flag_duplicate_groups`).
+2.  **Instantiation:** The main loop creates a `Flag` object from your strategy's findings.
+3.  **Merging:** A central function resolves any overlaps between different `Flag` objects.
+4.  **Rendering & Application:** The UI asks your `Flag` object to `render()` itself and, if approved, asks it which indices to `get_indices_to_remove()`.
+
+**3. How to Add a New Cleaning Feature**
+
+Let's say you want to add a feature to flag commands longer than 200 characters. Here’s how you’d do it by following the pattern:
+
+1.  **Create the Strategy:** Write a new function, `flag_long_commands(all_entries)`, that yields the index of each long command.
+2.  **Create the `Flag` Class:** Create a new class, `LongCommandFlag(BaseFlag)`.
+    *   In its `render()` method, define how it should look on screen.
+    *   In its `get_indices_to_remove()` method, tell the system which entry to remove.
+3.  **Add it to the Pipeline:** In `main()`, add your new strategy and class to the `pipeline_steps` list.
+
+That's it. Notice you didn't have to touch the complex merging, display, or removal logic. You just created a new, self-contained component and plugged it in.
+"""
+
+# ============================================================================
+# ZSH LEXER
+# ============================================================================
+
+from __future__ import annotations
+
+import difflib
+import re
+import sys
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Iterator
+
+from pygments.lexer import RegexLexer, bygroups, include
+from pygments.token import (
+    Comment,
+    Error,
+    Generic,
+    Keyword,
+    Name,
+    Number,
+    Operator,
+    Punctuation,
+    String,
+    Text,
+    Token,
+)
+from rich import box
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.prompt import Confirm
+from rich.rule import Rule
+from rich.style import Style
+from rich.syntax import Syntax, SyntaxTheme
+from rich.table import Table
+from rich.text import Text as RichText
+from rich.theme import Theme
+
+# Define custom token types so Rich and Pygments know about them
+Name.Argument = Token.Name.Argument
+Name.Variable.Magic = Token.Name.Variable.Magic
+Keyword.Type = Token.Keyword.Type
+
+
+class ZshLexer(RegexLexer):
+    """
+    A robust, stateful Z-shell lexer for Pygments.
+    Use like so:
+    ```python
+    console = Console()
+    syntax = Syntax(sample, ZshLexer(), theme=MonokaiProTheme(), line_numbers=True)
+    console.print(syntax)
+    ```
+    """
+
+    name = "Z-shell"
+    aliases = ["zsh"]  # noqa: RUF012 ClassVar
+    filenames = ["*.zsh", "*.bash", "*.sh", ".zshrc", ".zprofile", "zshrc", "zprofile"]  # noqa: RUF012 ClassVar
+
+    flags = re.MULTILINE | re.DOTALL
+
+    tokens = {  # noqa: RUF012 ClassVar
+        # '_base' contains common patterns, now correctly ordered
+        "_base": [
+            (r"\\.", String.Escape),
+            # IMPORTANT: Arithmetic must be checked before command substitution
+            (r"\$\(\(", Operator, "arithmetic_expansion"),
+            (r"\$\(", String.Interpol, "command_substitution"),
+            (
+                r"\b(if|fi|else|elif|then|for|in|while|do|done|case|esac|function|select)\b",
+                Keyword.Reserved,
+            ),
+            (
+                r"\b(echo|printf|cd|pwd|export|unset|readonly|source|exit|return|break|continue)\b",
+                Name.Builtin,
+            ),
+            (r"\$\{", Name.Variable.Magic, "parameter_expansion"),
+            (r"\$[a-zA-Z0-9_@*#?$!~-]+", Name.Variable),
+            (r"'[^']*'", String.Single),
+            (r'"', String.Double, "string_double"),
+        ],
+        "root": [
+            (r"\s+", Text),
+            (r"(<<<|<<-?|>>?|<&|>&)?[0-9]*[<>]", Operator),
+            (r"\|\|?|&&|&", Operator),
+            (r"[;()\[\]{}]", Punctuation),
+            # IMPORTANT: Give numbers explicit priority
+            (r"\b[0-9]+\b", Number.Integer),
+            include("_base"),
+            (r"([a-zA-Z0-9_./-]+)", Name.Function, "cmdtail"),
+        ],
+        "cmdtail": [
+            (r"\n", Text, "#pop"),
+            (r"[|]", Operator, "#pop"),
+            (r"[;&]", Punctuation, "#pop"),
+            (r"\s+", Text),
+            (r"(?:--?|\+)[a-zA-Z0-9][\w-]*", Name.Attribute),
+            (r"=", Operator),
+            # IMPORTANT: Give numbers explicit priority
+            (r"\b[0-9]+\b", Number.Integer),
+            include("_base"),
+            (r"[^=\s;&|(){}<>\[\]]+", Name.Argument),
+        ],
+        "string_double": [
+            (r'"', String.Double, "#pop"),
+            (r'\\(["$`\\])', String.Escape),
+            include("_base"),
+        ],
+        "command_substitution": [
+            (r"\)", String.Interpol, "#pop"),
+            include("root"),
+        ],
+        "arithmetic_expansion": [
+            (r"\)\)", Operator, "#pop"),
+            (r"[-+*/%&|<>!=^]+", Operator.Word),
+            (r"\b[0-9]+\b", Number.Integer),
+            (r"[a-zA-Z_][a-zA-Z0-9_]*", Name.Variable),
+            (r"\s+", Text),
+        ],
+        "parameter_expansion": [
+            (r"\}", Name.Variable.Magic, "#pop"),
+            (r"\s+", Text),
+            # Nested constructs
+            (r"\$\{", Name.Variable.Magic, "#push"),
+            (r"\$\(", String.Interpol, "command_substitution"),
+            (r"\$\(\(", Operator, "arithmetic_expansion"),
+            # Match flags and the variable name together
+            (
+                r"(\([#@=a-zA-Z:?^]+\))([a-zA-Z_][a-zA-Z0-9_]*)",
+                bygroups(Keyword.Type, Name.Variable),
+            ),
+            # Match just a variable name if no flags
+            (r"[a-zA-Z_][a-zA-Z0-9_]*", Name.Variable),
+            # Operators for substitution, slicing, etc.
+            (r"[#%/:|~^]+", Operator),
+            # The rest is a pattern or other content
+            (r"[^}]+", Text),
+        ],
+    }
+
+
+class MonokaiProTheme(SyntaxTheme):
+    """Rich syntax-highlighting theme that matches Monokai Pro."""
+
+    _BLACK = "#2d2a2e"
+    _RED = "#ff6188"
+    _GREEN = "#a9dc76"
+    _YELLOW = "#ffd866"
+    _ORANGE = "#fc9867"
+    _PURPLE = "#ab9df2"
+    _CYAN = "#78dce8"
+    _WHITE = "#fcfcfa"
+    _COMMENT_GRAY = "#727072"
+
+    background_color = _BLACK
+    default_style = Style(color=_WHITE)
+
+    styles = {  # noqa: RUF012 ClassVar
+        # Zsh-specific additions with new, non-conflicting colors
+        Name.Function: Style(color=_GREEN, bold=True),  # git, curl
+        Name.Attribute: Style(color=_ORANGE),  # --long, -l
+        Name.Argument: Style(color=_PURPLE),  # a filename
+        Name.Variable.Magic: Style(color=_PURPLE),  # ${PATH}
+        Name.Builtin: Style(color=_CYAN, italic=True),
+        Number: Style(color=_CYAN),  # Colder color for numbers
+        Keyword.Type: Style(color=_CYAN, italic=True),  # For parameter flags like (f)
+        # Base styles
+        Text: Style(color=_WHITE),
+        Comment: Style(color=_COMMENT_GRAY, italic=True),
+        Keyword: Style(color=_RED, bold=True),
+        Operator: Style(color=_RED),
+        Operator.Word: Style(color=_RED),  # For +, -, * in arithmetic
+        Punctuation: Style(color=_WHITE),
+        Name.Variable: Style(color=_WHITE),
+        String: Style(color=_YELLOW),  # All strings are yellow
+        String.Escape: Style(color=_PURPLE),
+        String.Interpol: Style(color=_PURPLE, bold=True),
+        Error: Style(color=_RED, bold=True),
+        Generic.Emph: Style(italic=True),
+        Generic.Strong: Style(bold=True),
+    }
+
+    @classmethod
+    def get_style_for_token(cls, t):
+        return cls.styles.get(t, cls.default_style)
+
+    @classmethod
+    def get_background_style(cls):
+        return Style(bgcolor=cls._BLACK)
+
+
+# ============================================================================
+# CONFIGURATION & CONSTANTS
+# ============================================================================
+
+# Define a custom theme for a polished, modern look inspired by high-end dev tools
+CUSTOM_THEME = Theme(
+    {
+        "title": "bold #C678DD",
+        "reason": "bold #98C379",
+        "action": "italic #61AFEF",
+        "context": "#5C6370",
+        "border": "#4B5263",
+        "rule": "#4B5263",
+        "diff.plus": "bold #61AFEF",
+        "diff.minus": "bold #E06C75",
+        "info": "#61AFEF",
+        "success": "#98C379",
+        "warning": "#E5C07B",
+        "error": "#E06C75",
+        "linenumber": "#3A3F4C",
+    }
+)
+
+console = Console(stderr=True, theme=CUSTOM_THEME)
+
+# Type aliases for better readability
+IndividualCleaningStrategy = Callable[[list[list[str]]], Iterator[tuple[int, str]]]
+ClusterCleaningStrategy = Callable[[list[list[str]]], Iterator[tuple[int, int]]]
+
+# Regex patterns
+HISTORY_ENTRY_RE = re.compile(r"^: \d{10}:\d+;")
+
+BLACKLIST_PATTERNS = [
+    re.compile(r"--version\s*$"),  # Version flag
+    re.compile(r"[א-ת]+"),  # Hebrew characters
+    re.compile(r"[^\x20-\x7E\t]+"),  # Non-ASCII characters
+    re.compile(r"^ *\n?$"),  # Empty line
+    re.compile(r"^.$", re.DOTALL),  # Single character
+]
+
+# Similarity thresholds
+JACCARD_SIMILARITY_THRESHOLD = 0.5
+DIFFLIB_SIMILARITY_THRESHOLD = 0.75
+MAX_CLUSTER_LOOKAHEAD = 2
+
+
+class Config:
+    """Configuration for the cleaning pipeline"""
+
+    @property
+    def individual_strategies(self) -> list[IndividualCleaningStrategy]:
+        """→ Individual entry flagging strategies"""
+        return [
+            flag_individual_multiline,
+            flag_individual_empty,
+            flag_individual_blacklist,
+        ]
+
+    @property
+    def cluster_strategies(self) -> list[tuple[ClusterCleaningStrategy, str]]:
+        """→ Cluster flagging strategies with descriptions"""
+        return [
+            (flag_cluster_jaccard_similarity, "Consecutive similar entries (Jaccard)"),
+            (flag_cluster_difflib_similarity, "Consecutive similar entries (difflib)"),
+        ]
+
+    @property
+    def duplicate_strategy(self) -> Callable[[list[list[str]]], Iterator[list[int]]]:
+        """→ Duplicate detection strategy"""
+        return flag_duplicate_groups
+
+
+CONFIG = Config()
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+
+class BaseFlag(ABC):
+    """Abstract base class for a flagged change in the history file."""
+
+    def __init__(
+        self,
+        all_entries: list[list[str]],
+        entry_line_nums: list[int],
+        max_line_num_width: int,
+        reason_text: str,
+    ):
+        self.all_entries = all_entries
+        self.entry_line_nums = entry_line_nums
+        self.max_line_num_width = max_line_num_width
+        self.reason_text = reason_text
+
+    @abstractmethod
+    def get_indices_to_remove(self) -> set[int]:
+        """Returns the set of entry indices to be removed."""
+        raise NotImplementedError
+
+    def render(self) -> Panel:
+        """Returns a rich Panel object for display."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_sort_key(self) -> int:
+        """Returns the primary index used for sorting."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_all_covered_indices(self) -> set[int]:
+        """Returns all indices covered by this flag for overlap detection."""
+        raise NotImplementedError
+
+    def _format_line(
+        self, table: Table, entry_idx: int, content_renderable: RichText | Syntax, marker: str = " "
+    ):
+        line_num = self.entry_line_nums[entry_idx] + 1
+        line_num_str = f"{line_num}"
+        marker_text = RichText(marker, style=f"diff.{'plus' if marker == '+' else 'minus'}")
+        table.add_row(line_num_str, marker_text, content_renderable)
+
+
+class IndividualFlag(BaseFlag):
+    """Represents a single flagged entry to be removed."""
+
+    def __init__(
+        self,
+        entry_index: int,
+        reasons: list[str],
+        **kwargs,
+    ):
+        super().__init__(reason_text="\n".join(f"- {r}" for r in reasons), **kwargs)
+        self.entry_index = entry_index
+
+    def get_indices_to_remove(self) -> set[int]:
+        return {self.entry_index}
+
+    def get_sort_key(self) -> int:
+        return self.entry_index
+
+    def get_all_covered_indices(self) -> set[int]:
+        return {self.entry_index}
+
+    def render(self) -> Panel:
+        # One clear instance of code duplication shows up in the render methods of ClusterFlag and
+        # DuplicateFlag. Both classes build very similar UI structures using Rich's Table and Group: they
+        # create a meta_table with "Reason" and "Action" rows, then an entries_table with line numbers,
+        # markers ("+" or "-"), and command displays. The logic for handling context lines, dimming non-kept
+        # entries, and formatting with Syntax or RichText is nearly identical, down to the Rule separator and
+        # Panel wrapping. Even the title formats are close ("Similar Command Sequence" vs. "Duplicate
+        # Commands"). This repetition means that if you ever need to tweak the display format—say, to add
+        # timestamps or change styling—you'd have to update both places, which increases the risk of
+        # inconsistencies or forgotten changes. A good fix could be to extract a shared rendering helper
+        # method into BaseFlag, perhaps something like _render_sequence_panel(self, indices_to_display,
+        # kept_index), where you pass in the list of indices and which one to mark as kept. That way, both
+        # subclasses could call it with their specific data, reducing duplication while keeping the logic
+        # centralized.
+        meta_table = Table.grid(padding=(0, 2))
+        meta_table.add_column(style="reason")
+        meta_table.add_column()
+        meta_table.add_row("Reason(s):", self.reason_text)
+        entry_cmd = remove_timestamp_from_entry(self.all_entries[self.entry_index])
+
+        line_num = self.entry_line_nums[self.entry_index] + 1
+        line_num_str = f"{line_num:>{self.max_line_num_width}}"
+        line_num_text = RichText(line_num_str, style="linenumber")
+
+        entry_syntax = Syntax(entry_cmd, "bash", theme="monokai", line_numbers=False)
+
+        entry_display_table = Table.grid(padding=(0, 1))
+        entry_display_table.add_column(width=self.max_line_num_width, justify="right")
+        entry_display_table.add_column()
+        entry_display_table.add_row(line_num_text, entry_syntax)
+
+        meta_table.add_row("Entry:", entry_display_table)
+
+        return Panel(
+            meta_table,
+            box=box.ROUNDED,
+            title="[title]Flagged Entry[/title]",
+            border_style="border",
+            padding=(1, 2),
+        )
+
+
+class ClusterFlag(BaseFlag):
+    """Represents a sequence of similar commands to be collapsed."""
+
+    def __init__(self, start_index: int, end_index: int, **kwargs):
+        super().__init__(**kwargs)
+        self.start_index = start_index
+        self.end_index = end_index
+
+    def get_indices_to_remove(self) -> set[int]:
+        return set(range(self.start_index, self.end_index))
+
+    def get_sort_key(self) -> int:
+        return self.start_index
+
+    def get_all_covered_indices(self) -> set[int]:
+        return set(range(self.start_index, self.end_index + 1))
+
+    def render(self) -> Panel:
+        meta_table = Table.grid(padding=(0, 1, 1, 2))
+        meta_table.add_column(style="reason", no_wrap=True)
+        meta_table.add_column()
+        meta_table.add_row("Reason:", self.reason_text)
+        meta_table.add_row(
+            "Action:",
+            RichText("Keep only the last entry in the sequence", style="action"),
+        )
+
+        entries_table = Table.grid(padding=(0, 1))
+        entries_table.add_column(
+            width=self.max_line_num_width + 1, justify="right", style="linenumber"
+        )
+        entries_table.add_column(width=2, justify="right")  # For diff markers
+        entries_table.add_column()
+
+        # Context: entry before the cluster
+        if self.start_index > 0:
+            before_idx = self.start_index - 1
+            cmd = remove_timestamp_from_entry(self.all_entries[before_idx])
+            self._format_line(entries_table, before_idx, RichText(cmd, style="context"))
+
+        # The cluster entries
+        for i, entry_idx in enumerate(range(self.start_index, self.end_index + 1)):
+            is_last = i == (self.end_index - self.start_index)
+            cmd = remove_timestamp_from_entry(self.all_entries[entry_idx])
+            if is_last:
+                syntax = Syntax(cmd, "bash", theme="monokai", line_numbers=False)
+                self._format_line(entries_table, entry_idx, syntax, marker="+")
+            else:
+                dimmed_syntax = RichText(cmd, style="context")
+                self._format_line(entries_table, entry_idx, dimmed_syntax, marker="-")
+
+        # Context: entry after the cluster
+        if self.end_index < len(self.all_entries) - 1:
+            after_idx = self.end_index + 1
+            cmd = remove_timestamp_from_entry(self.all_entries[after_idx])
+            self._format_line(entries_table, after_idx, RichText(cmd, style="context"))
+
+        content_group = Group(
+            meta_table,
+            Rule(style="rule"),
+            entries_table,
+        )
+
+        return Panel(
+            content_group,
+            box=box.ROUNDED,
+            title="[title]Similar Command Sequence[/title]",
+            border_style="border",
+            padding=(0, 1),
+        )
+
+
+class DuplicateFlag(BaseFlag):
+    """Represents a group of duplicate commands to be collapsed."""
+
+    def __init__(self, entry_indices: list[int], **kwargs):
+        super().__init__(**kwargs)
+        self.entry_indices = entry_indices
+
+    def get_indices_to_remove(self) -> set[int]:
+        return set(self.entry_indices[:-1])
+
+    def get_sort_key(self) -> int:
+        return self.entry_indices[0]
+
+    def get_all_covered_indices(self) -> set[int]:
+        return set(self.entry_indices)
+
+    def render(self) -> Panel:
+        meta_table = Table.grid(padding=(0, 1, 1, 2))
+        meta_table.add_column(style="reason", no_wrap=True)
+        meta_table.add_column()
+        meta_table.add_row("Reason:", self.reason_text)
+        meta_table.add_row(
+            "Action:",
+            RichText("Keep only the last entry in the sequence", style="action"),
+        )
+
+        entries_table = Table.grid(padding=(0, 1))
+        entries_table.add_column(
+            width=self.max_line_num_width + 1, justify="right", style="linenumber"
+        )
+        entries_table.add_column(width=2, justify="right")
+        entries_table.add_column()
+
+        for i, entry_idx in enumerate(self.entry_indices):
+            is_last = i == len(self.entry_indices) - 1
+            cmd = remove_timestamp_from_entry(self.all_entries[entry_idx])
+            if is_last:
+                syntax = Syntax(cmd, "bash", theme="monokai", line_numbers=False)
+                self._format_line(entries_table, entry_idx, syntax, marker="+")
+            else:
+                dimmed_syntax = RichText(cmd, style="context")
+                self._format_line(entries_table, entry_idx, dimmed_syntax, marker="-")
+
+        content_group = Group(
+            meta_table,
+            Rule(style="rule"),
+            entries_table,
+        )
+
+        return Panel(
+            content_group,
+            box=box.ROUNDED,
+            title="[title]Duplicate Commands[/title]",
+            border_style="border",
+            padding=(0, 1),
+        )
+
+
+# ============================================================================
+# PARSING & UTILITIES
+# ============================================================================
+
+
+def _console_print(string="", *args, **kwargs) -> None:
+    """→ Safe console printing with fallback"""
+    try:
+        console.print(string, *args, **kwargs)
+    except Exception:
+        kwargs.setdefault("file", sys.stderr)
+        kwargs_clean = {k: v for k, v in kwargs.items() if k not in ["sep", "file", "end", "flush"]}
+        print(string, *args, **kwargs_clean)
+
+
+def parse_history_entries(all_lines: list[str]) -> Iterator[tuple[int, list[str]]]:
+    """→ Parses zsh history into individual entry blocks, yielding (start_line, block)"""
+    if not all_lines:
+        return
+
+    i = 0
+    num_lines = len(all_lines)
+    while i < num_lines:
+        current_line = all_lines[i]
+        if HISTORY_ENTRY_RE.match(current_line):
+            j = i + 1
+            while j < num_lines and not HISTORY_ENTRY_RE.match(all_lines[j]):
+                j += 1
+            yield i, all_lines[i:j]  # Yield 0-indexed line number and block
+            i = j
+        else:
+            yield i, [current_line]
+            i += 1
+
+
+def remove_timestamp_from_entry(entry_block: list[str]) -> str:
+    """→ Extracts the command text from a history entry block"""
+    if not entry_block:
+        return ""
+    first_line = entry_block[0]
+    if HISTORY_ENTRY_RE.match(first_line):
+        command_part = first_line.split(";", 1)[1]
+        return "\n".join([command_part] + entry_block[1:])
+    return "\n".join(entry_block)
+
+
+def _ask_yes_no(prompt_text: str) -> bool:
+    """→ Helper function to ask a yes/no question and return a boolean"""
+    return Confirm.ask(prompt_text, console=console, default=False)
+
+
+# ============================================================================
+# INDIVIDUAL ENTRY FLAGGING STRATEGIES
+# ============================================================================
+
+
+def flag_individual_multiline(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+    """→ Individual strategy: Flags multi-line entries"""
+    for i, entry_block in enumerate(all_entries):
+        if len(entry_block) > 1:
+            yield i, "It is a multi-line entry."
+
+
+def flag_individual_empty(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+    """→ Individual strategy: Flags empty entries"""
+    for i, entry_block in enumerate(all_entries):
+        first_line_command = remove_timestamp_from_entry(entry_block)
+        if not first_line_command.strip():
+            yield i, "It is an empty entry."
+
+
+def flag_individual_blacklist(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+    """→ Individual strategy: Flags entries matching blacklist patterns"""
+    for i, entry_block in enumerate(all_entries):
+        command = remove_timestamp_from_entry(entry_block)
+        if match := next((pattern.search(command) for pattern in BLACKLIST_PATTERNS), None):
+            yield i, f"Matches '{match.group()}'"
+
+
+def flag_duplicate_groups(all_entries: list[list[str]]) -> Iterator[list[int]]:
+    """→ Duplicate strategy: Groups duplicate commands, yielding a list of indices for each group."""
+    command_to_indices: dict[str, list[int]] = defaultdict(list)
+    for i, entry_block in enumerate(all_entries):
+        command = remove_timestamp_from_entry(entry_block).strip()
+        # Ignore commands marked with #HIST:KEEP
+        if command and not re.search(r"# *HIST:KEEP", command, re.IGNORECASE):
+            command_to_indices[command].append(i)
+
+    for indices in command_to_indices.values():
+        if len(indices) > 1:
+            yield sorted(indices)
+
+
+# ============================================================================
+# CLUSTER SIMILARITY DETECTION
+# ============================================================================
+
+
+def are_commands_similar_jaccard(cmd1: str, cmd2: str) -> bool:
+    """→ Similarity check: Token-based Jaccard similarity"""
+    tokens1 = set(re.split(r"[/ \s]+", cmd1))
+    tokens2 = set(re.split(r"[/ \s]+", cmd2))
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    if not union:
+        return True  # Both empty
+    jaccard_similarity = len(intersection) / len(union)
+    return jaccard_similarity >= JACCARD_SIMILARITY_THRESHOLD
+
+
+def are_commands_similar_difflib(cmd1: str, cmd2: str) -> bool:
+    """→ Similarity check: Token-based difflib ratio"""
+    if not cmd1.strip() or not cmd2.strip():
+        return False
+
+    tokens1 = set(re.split(r"[/ \s]+", cmd1))
+    tokens2 = set(re.split(r"[/ \s]+", cmd2))
+
+    if not tokens1 or not tokens2:
+        return False
+
+    intersection = tokens1.intersection(tokens2)
+    diff1_to_2 = tokens1.difference(tokens2)
+    diff2_to_1 = tokens2.difference(tokens1)
+
+    sorted_intersection = " ".join(sorted(intersection))
+    sorted_diff1_to_2 = " ".join(sorted(diff1_to_2))
+    sorted_diff2_to_1 = " ".join(sorted(diff2_to_1))
+
+    # Constructing strings for comparison
+    t1 = f"{sorted_intersection} {sorted_diff1_to_2}".strip()
+    t2 = f"{sorted_intersection} {sorted_diff2_to_1}".strip()
+
+    # Ratios to check
+    ratio1 = difflib.SequenceMatcher(None, sorted_intersection, t1).ratio()
+    ratio2 = difflib.SequenceMatcher(None, sorted_intersection, t2).ratio()
+    ratio3 = difflib.SequenceMatcher(None, t1, t2).ratio()
+
+    return max(ratio1, ratio2, ratio3) >= DIFFLIB_SIMILARITY_THRESHOLD
+
+
+# ============================================================================
+# CLUSTER FLAGGING STRATEGIES
+# ============================================================================
+
+
+def flag_cluster_jaccard_similarity(all_entries: list[list[str]]) -> Iterator[tuple[int, int]]:
+    """→ Cluster strategy: Groups similar commands using Jaccard similarity with lookahead"""
+    commands = [remove_timestamp_from_entry(entry).strip() for entry in all_entries]
+    if len(commands) < 2:
+        return
+
+    i = 0
+    while i < len(commands):
+        current_cluster_indices = [i]
+        last_successful_match_j = i
+        for j in range(i + 1, len(commands)):
+            if (j - last_successful_match_j) > MAX_CLUSTER_LOOKAHEAD:
+                break
+            is_similar_to_cluster = False
+            for cluster_member_index in current_cluster_indices:
+                cmd1 = commands[cluster_member_index]
+                cmd2 = commands[j]
+                if cmd1 and cmd2 and are_commands_similar_jaccard(cmd1, cmd2):
+                    is_similar_to_cluster = True
+                    break
+            if is_similar_to_cluster:
+                for k in range(last_successful_match_j + 1, j + 1):
+                    current_cluster_indices.append(k)
+                last_successful_match_j = j
+        if len(current_cluster_indices) > 1:
+            start_index = current_cluster_indices[0]
+            end_index = current_cluster_indices[-1]
+            yield start_index, end_index
+            i = end_index + 1
+        else:
+            i += 1
+
+
+def flag_cluster_difflib_similarity(all_entries: list[list[str]]) -> Iterator[tuple[int, int]]:
+    """→ Cluster strategy: Groups similar commands using simple adjacent-pair difflib checks"""
+    commands = [remove_timestamp_from_entry(entry).strip() for entry in all_entries]
+    if len(commands) < 2:
+        return
+
+    i = 0
+    while i < len(commands) - 1:
+        j = i
+        while (
+            j < len(commands) - 1
+            and commands[j]
+            and commands[j + 1]
+            and are_commands_similar_difflib(commands[j], commands[j + 1])
+        ):
+            j += 1
+        if j > i:
+            yield i, j
+            i = j + 1
+        else:
+            i += 1
+
+
+# ============================================================================
+# PROCESSING & MERGING
+# ============================================================================
+
+
+def collect_individual_flagged_entries(
+    entries: list[list[str]], strategies: list[IndividualCleaningStrategy]
+) -> list[IndividualFlag]:
+    """→ Processing: Collects individual flagged entries without processing them"""
+    flagged_entries = []
+    for strategy in strategies:
+        for index, reason in strategy(entries):
+            entry_block = entries[index]
+            command = remove_timestamp_from_entry(entry_block)
+            if re.search(r"# *HIST:KEEP", command, re.IGNORECASE):
+                continue
+
+            flagged_entry = IndividualFlag(entry_index=index, reasons=[reason])
+            flagged_entries.append(flagged_entry)
+
+    return flagged_entries
+
+
+def collect_cluster_flagged_entries(
+    entries: list[list[str]],
+    flagging_function: ClusterCleaningStrategy,
+    reason_text: str,
+) -> list[ClusterFlag]:
+    """→ Processing: Collects cluster flagged entries, returning a list of FlaggedEntry objects"""
+    flagged_entries = []
+    for start, end in flagging_function(entries):
+        flagged_entry = ClusterFlag(start_index=start, end_index=end, reason_text=reason_text)
+        flagged_entries.append(flagged_entry)
+    return flagged_entries
+
+
+def collect_duplicate_flagged_entries(
+    entries: list[list[str]],
+    flagging_function: Callable[[list[list[str]]], Iterator[list[int]]],
+) -> list[DuplicateFlag]:
+    """→ Processing: Collects duplicate flagged entries"""
+    flagged_entries = []
+    for indices in flagging_function(entries):
+        flagged_entry = DuplicateFlag(entry_indices=indices)
+        flagged_entries.append(flagged_entry)
+    return flagged_entries
+
+
+def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
+    """→ Processing: Merges and de-duplicates flags"""
+    # For LATER: This "god function" knows too much about each flag type's internals.
+    # Adding more flag subclasses will require extending its if-isinstance branches,
+    # creating a maintenance bottleneck.
+    # Consider giving each flag type a class method for merging within
+    # its own kind (e.g., ClusterFlag.merge_overlaps(list_of_clusters)),
+    # then have merge_flagged_entries coordinate at a higher level using a type registry.
+    # This encapsulates type-specific logic and simplifies the central merger.
+
+    if not flagged_entries:
+        return []
+
+    # 1. Separate flags by type
+    individual_flags: dict[int, IndividualFlag] = {}
+    cluster_flags: list[ClusterFlag] = []
+    duplicate_flags: list[DuplicateFlag] = []
+
+    for entry in flagged_entries:
+        if isinstance(entry, IndividualFlag):
+            if entry.entry_index in individual_flags:
+                # Merge reasons if the same entry is flagged multiple times
+                existing_reasons = individual_flags[entry.entry_index].reason_text
+                new_reasons = entry.reason_text
+                individual_flags[
+                    entry.entry_index
+                ].reason_text = f"{existing_reasons}\n{new_reasons}"
+            else:
+                individual_flags[entry.entry_index] = entry
+        elif isinstance(entry, ClusterFlag):
+            cluster_flags.append(entry)
+        elif isinstance(entry, DuplicateFlag):
+            duplicate_flags.append(entry)
+
+    # 2. Merge overlapping clusters
+    merged_clusters: list[ClusterFlag] = []
+    if cluster_flags:
+        cluster_flags.sort(key=lambda flag: flag.start_index)
+        current_cluster = cluster_flags[0]
+        for next_cluster in cluster_flags[1:]:
+            if next_cluster.start_index <= current_cluster.end_index + 1:
+                current_cluster.end_index = max(current_cluster.end_index, next_cluster.end_index)
+                if next_cluster.reason_text not in current_cluster.reason_text:
+                    current_cluster.reason_text += f" / {next_cluster.reason_text}"
+            else:
+                merged_clusters.append(current_cluster)
+                current_cluster = next_cluster
+        merged_clusters.append(current_cluster)
+
+    # 3. Filter out other flags that are now inside a merged cluster
+    final_flags: list[BaseFlag] = list(merged_clusters)
+    cluster_indices = set()
+    for cluster in merged_clusters:
+        cluster_indices.update(cluster.get_all_covered_indices())
+
+    for index, individual_flag in individual_flags.items():
+        if index not in cluster_indices:
+            final_flags.append(individual_flag)
+
+    for dup_flag in duplicate_flags:
+        valid_indices = [
+            i
+            for i in dup_flag.entry_indices
+            if i not in cluster_indices and i not in individual_flags
+        ]
+        if len(valid_indices) > 1:
+            dup_flag.entry_indices = valid_indices
+            final_flags.append(dup_flag)
+
+    # 4. Return a single, sorted list of flags
+    return sorted(final_flags, key=lambda flag: flag.get_sort_key())
+
+
+def calculate_indices_to_remove(approved_flags: list[BaseFlag]) -> set[int]:
+    """→ Processing: Converts approved flags into a set of indices to remove"""
+    indices_to_remove = set()
+    for flag in approved_flags:
+        indices_to_remove.update(flag.get_indices_to_remove())
+    return indices_to_remove
+
+
+# ============================================================================
+# USER INTERFACE & DISPLAY
+# ============================================================================
+
+
+def display_and_confirm_all_changes(flagged_entries: list[BaseFlag]) -> bool:
+    """→ UI: Displays all unique, merged changes and gets a single user confirmation"""
+    if not flagged_entries:
+        return False
+
+    num_changes = len(flagged_entries)
+    _console_print(Rule(f"[bold]Found {num_changes} potential change(s)[/bold]"))
+
+    for i, entry in enumerate(flagged_entries, 1):
+        _console_print()
+        _console_print(Rule(f"Change {i} of {num_changes}", style="rule", characters="─"))
+        _console_print(entry.render())
+
+    console.print()
+    return _ask_yes_no(f"Apply all {num_changes} changes above?")
+
+
+# ============================================================================
+# FILE I/O & MAIN LOGIC
+# ============================================================================
+
+
+def read_history_file(file_path: Path) -> list[str] | None:
+    """→ File I/O: Reads the history file and returns its lines, handling errors"""
+    try:
+        return file_path.read_text(errors="ignore").splitlines()
+    except FileNotFoundError:
+        _console_print(f"[error]Error: History file not found at '{file_path}'[/error]\n")
+        return None
+    except IOError as e:
+        _console_print(f"[error]Error reading file '{file_path}': {e}[/error]\n")
+        return None
+
+
+def backup_and_write_history(
+    history_path: Path, cleaned_lines: list[str], original_lines: list[str]
+) -> None:
+    """→ File I/O: Saves a backup and writes the new cleaned history file"""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    backup_filename = history_path.parent / f".zsh_hist.clean.{timestamp}"
+    try:
+        with backup_filename.open("w", encoding="utf-8") as f:
+            f.write("\n".join(original_lines) + "\n")
+        _console_print(f"Backup saved to [info]{backup_filename}[/info]\n")
+    except IOError as e:
+        _console_print(f"[error]Error writing to backup file {backup_filename}: {e!r}[/error]\n")
+        # Do not exit, we can still try to write the main file
+
+    try:
+        with history_path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(cleaned_lines) + "\n")
+        _console_print(f"Cleaned history saved to [success]{history_path}[/success]\n")
+    except IOError as e:
+        _console_print(f"[error]Error writing to history file {history_path}: {e!r}[/error]\n")
+        sys.exit(1)
+
+
+def main() -> None:
+    """→ Main: Orchestrates the entire cleaning pipeline"""
+    if len(sys.argv) > 1:
+        history_file_path = Path(sys.argv[1])
+    else:
+        history_file_path = Path.home() / ".zsh_history"
+
+    original_lines = read_history_file(history_file_path)
+    if original_lines is None:
+        sys.exit(1)
+
+    all_entries_with_lines = list(parse_history_entries(original_lines))
+    all_entries = [block for _, block in all_entries_with_lines]
+    entry_line_nums = [line_num for line_num, _ in all_entries_with_lines]
+    max_line_num_width = len(str(len(original_lines)))
+
+    # --- Common data for all flag instances ---
+    flag_context = {
+        "all_entries": all_entries,
+        "entry_line_nums": entry_line_nums,
+        "max_line_num_width": max_line_num_width,
+    }
+
+    # --- Declarative pipeline definition ---
+    pipeline_steps = [
+        {
+            "flag_class": IndividualFlag,
+            "strategy": strategy,
+        }
+        for strategy in CONFIG.individual_strategies
+    ]
+    pipeline_steps.extend(
+        {
+            "flag_class": ClusterFlag,
+            "strategy": strategy,
+            "reason": reason,
+        }
+        for strategy, reason in CONFIG.cluster_strategies
+    )
+    pipeline_steps.append(
+        {
+            "flag_class": DuplicateFlag,
+            "strategy": CONFIG.duplicate_strategy,
+            "reason": "Duplicate command; keeping the last instance",
+        }
+    )
+
+    # --- PHASE 1: COLLECT ---
+    raw_flagged_entries: list[BaseFlag] = []
+    for step in pipeline_steps:
+        FlagClass = step["flag_class"]
+        strategy = step["strategy"]
+        reason = step.get("reason", "")
+
+        for result in strategy(all_entries):
+            # The structure of `result` depends on the strategy
+            if FlagClass is IndividualFlag:
+                index, single_reason = result
+                # We group reasons later in merge, so start with a list
+                flag = IndividualFlag(entry_index=index, reasons=[single_reason], **flag_context)
+            elif FlagClass is ClusterFlag:
+                start, end = result
+                flag = ClusterFlag(
+                    start_index=start, end_index=end, reason_text=reason, **flag_context
+                )
+            elif FlagClass is DuplicateFlag:
+                indices = result
+                flag = DuplicateFlag(entry_indices=indices, reason_text=reason, **flag_context)
+            else:
+                continue
+            raw_flagged_entries.append(flag)
+
+    # --- PHASE 2: MERGE & CONFIRM ---
+    final_flagged_entries = merge_flagged_entries(raw_flagged_entries)
+
+    if not final_flagged_entries:
+        _console_print("[success]No entries needed cleaning. History file unchanged.[/success]")
+        return
+
+    user_approved_all = display_and_confirm_all_changes(final_flagged_entries)
+
+    if not user_approved_all:
+        _console_print("[warning]No changes applied. History file unchanged.[/warning]")
+        return
+
+    # --- PHASE 3: APPLY ---
+    indices_to_remove = calculate_indices_to_remove(final_flagged_entries)
+
+    # Build the final list of entries by keeping those not in the removal set.
+    final_cleaned_entries = [
+        entry for i, entry in enumerate(all_entries) if i not in indices_to_remove
+    ]
+
+    if len(all_entries) == len(final_cleaned_entries):
+        _console_print(
+            "\n[warning]Approval given, but no entries were ultimately removed. History file unchanged.[/warning]"
+        )
+        return
+
+    cleaned_lines = [line for entry in final_cleaned_entries for line in entry]
+
+    backup_and_write_history(history_file_path, cleaned_lines, original_lines)
+
+    removed_count = len(all_entries) - len(final_cleaned_entries)
+    _console_print(f"[success]Cleaned history: removed {removed_count} entries.[/success]")
+
+
+if __name__ == "__main__":
+    main()

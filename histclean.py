@@ -749,49 +749,6 @@ def flag_cluster_difflib_similarity(all_entries: list[list[str]]) -> Iterator[tu
 # ============================================================================
 
 
-def collect_individual_flagged_entries(
-    entries: list[list[str]], strategies: list[IndividualCleaningStrategy]
-) -> list[IndividualFlag]:
-    """→ Processing: Collects individual flagged entries without processing them"""
-    flagged_entries = []
-    for strategy in strategies:
-        for index, reason in strategy(entries):
-            entry_block = entries[index]
-            command = remove_timestamp_from_entry(entry_block)
-            if re.search(r"# *HIST:KEEP", command, re.IGNORECASE):
-                continue
-
-            flagged_entry = IndividualFlag(entry_index=index, reasons=[reason])
-            flagged_entries.append(flagged_entry)
-
-    return flagged_entries
-
-
-def collect_cluster_flagged_entries(
-    entries: list[list[str]],
-    flagging_function: ClusterCleaningStrategy,
-    reason_text: str,
-) -> list[ClusterFlag]:
-    """→ Processing: Collects cluster flagged entries, returning a list of FlaggedEntry objects"""
-    flagged_entries = []
-    for start, end in flagging_function(entries):
-        flagged_entry = ClusterFlag(start_index=start, end_index=end, reason_text=reason_text)
-        flagged_entries.append(flagged_entry)
-    return flagged_entries
-
-
-def collect_duplicate_flagged_entries(
-    entries: list[list[str]],
-    flagging_function: Callable[[list[list[str]]], Iterator[list[int]]],
-) -> list[DuplicateFlag]:
-    """→ Processing: Collects duplicate flagged entries"""
-    flagged_entries = []
-    for indices in flagging_function(entries):
-        flagged_entry = DuplicateFlag(entry_indices=indices)
-        flagged_entries.append(flagged_entry)
-    return flagged_entries
-
-
 def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
     """→ Processing: Merges and de-duplicates flags"""
     # For LATER: This "god function" knows too much about each flag type's internals.

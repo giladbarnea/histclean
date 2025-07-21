@@ -626,8 +626,7 @@ def flag_duplicate_groups(all_entries: list[list[str]]) -> Iterator[list[int]]:
     command_to_indices: dict[str, list[int]] = defaultdict(list)
     for i, entry_block in enumerate(all_entries):
         command = remove_timestamp_from_entry(entry_block).strip()
-        # Ignore commands marked with #HIST:KEEP
-        if command and not re.search(r"# *HIST:KEEP", command, re.IGNORECASE):
+        if command:
             command_to_indices[command].append(i)
 
     for indices in command_to_indices.values():
@@ -822,12 +821,68 @@ def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
     return sorted(final_flags, key=lambda flag: flag.get_sort_key())
 
 
-def calculate_indices_to_remove(approved_flags: list[BaseFlag]) -> set[int]:
-    """→ Processing: Converts approved flags into a set of indices to remove"""
+def filter_flags_by_hist_keep(flagged_entries: list[BaseFlag], all_entries: list[list[str]]) -> list[BaseFlag]:
+    """→ Processing: Filters flags to exclude entries marked with HIST:KEEP"""
+    def has_hist_keep(index: int) -> bool:
+        if index >= len(all_entries):
+            return False
+        command = remove_timestamp_from_entry(all_entries[index])
+        return bool(re.search(r"# *HIST:KEEP", command, re.IGNORECASE))
+    
+    filtered_flags = []
+    
+    for flag in flagged_entries:
+        if isinstance(flag, IndividualFlag):
+            # Remove individual flags for HIST:KEEP entries
+            if not has_hist_keep(flag.entry_index):
+                filtered_flags.append(flag)
+        
+        elif isinstance(flag, ClusterFlag):
+            # For clusters, check if any entries being removed have HIST:KEEP
+            indices_to_remove = set(range(flag.start_index, flag.end_index))
+            hist_keep_indices = {i for i in indices_to_remove if has_hist_keep(i)}
+            
+            # If no HIST:KEEP entries in the removal set, keep the flag as-is
+            if not hist_keep_indices:
+                filtered_flags.append(flag)
+            # If all removal entries have HIST:KEEP, drop the flag entirely
+            elif hist_keep_indices == indices_to_remove:
+                continue
+            # If some have HIST:KEEP, we could adjust the cluster, but for simplicity, keep the flag
+            # (the actual removal will be filtered later in calculate_indices_to_remove)
+            else:
+                filtered_flags.append(flag)
+        
+        elif isinstance(flag, DuplicateFlag):
+            # Remove HIST:KEEP entries from the duplicate list, but keep the last entry
+            non_hist_keep_indices = [i for i in flag.entry_indices if not has_hist_keep(i)]
+            
+            # If we still have duplicates after filtering, keep the flag with updated indices
+            if len(non_hist_keep_indices) > 1:
+                flag.entry_indices = non_hist_keep_indices
+                filtered_flags.append(flag)
+            # If only one or zero entries remain, drop the flag
+    
+    return filtered_flags
+
+
+def calculate_indices_to_remove(approved_flags: list[BaseFlag], all_entries: list[list[str]]) -> set[int]:
+    """→ Processing: Converts approved flags into a set of indices to remove, with final HIST:KEEP safety check"""
     indices_to_remove = set()
     for flag in approved_flags:
         indices_to_remove.update(flag.get_indices_to_remove())
-    return indices_to_remove
+    
+    # Final safety check: remove any HIST:KEEP entries that might have slipped through (e.g., in mixed clusters)
+    filtered_indices = set()
+    for index in indices_to_remove:
+        if index < len(all_entries):
+            command = remove_timestamp_from_entry(all_entries[index])
+            if not re.search(r"# *HIST:KEEP", command, re.IGNORECASE):
+                filtered_indices.add(index)
+        else:
+            filtered_indices.add(index)  # Keep invalid indices for error handling elsewhere
+    
+    return filtered_indices
 
 
 # ============================================================================
@@ -964,21 +1019,22 @@ def main() -> None:
                 continue
             raw_flagged_entries.append(flag)
 
-    # --- PHASE 2: MERGE & CONFIRM ---
-    final_flagged_entries = merge_flagged_entries(raw_flagged_entries)
+    # --- PHASE 2: MERGE & FILTER ---
+    merged_flagged_entries = merge_flagged_entries(raw_flagged_entries)
+    final_flagged_entries = filter_flags_by_hist_keep(merged_flagged_entries, all_entries)
 
     if not final_flagged_entries:
         _console_print("[success]No entries needed cleaning. History file unchanged.[/success]")
         return
 
+    # --- PHASE 3: CONFIRM & APPLY ---
     user_approved_all = display_and_confirm_all_changes(final_flagged_entries)
 
     if not user_approved_all:
         _console_print("[warning]No changes applied. History file unchanged.[/warning]")
         return
 
-    # --- PHASE 3: APPLY ---
-    indices_to_remove = calculate_indices_to_remove(final_flagged_entries)
+    indices_to_remove = calculate_indices_to_remove(final_flagged_entries, all_entries)
 
     # Build the final list of entries by keeping those not in the removal set.
     final_cleaned_entries = [

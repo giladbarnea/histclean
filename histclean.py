@@ -981,6 +981,7 @@ class HistoryCleanApp(App[list[BaseFlag]]):
         self.flagged_entries = flagged_entries
         self.panels: list[FocusableStatic] = []
         self.scroll_container: VerticalScroll | None = None
+        self.flag_states: dict[BaseFlag, bool] = {flag: True for flag in flagged_entries}
 
     BINDINGS = [
         Binding("up", "focus_previous_panel", "Focus previous panel", priority=True),
@@ -997,7 +998,7 @@ class HistoryCleanApp(App[list[BaseFlag]]):
             for entry in self.flagged_entries:
                 panel_widget = FocusableStatic(entry.render(), classes="panel")
                 yield panel_widget
-                panel_widget.data = entry
+                panel_widget.flag = entry
                 self.panels.append(panel_widget)
         yield Footer()
 
@@ -1034,11 +1035,15 @@ class HistoryCleanApp(App[list[BaseFlag]]):
 
     def action_toggle_panel(self):
         focused = self.focused
-        if isinstance(focused, FocusableStatic):
-            focused.toggle_class("disabled")
+        if isinstance(focused, FocusableStatic) and (flag := focused.flag):
+            self.flag_states[flag] = not self.flag_states[flag]
+            if self.flag_states[flag]:
+                focused.remove_class("disabled")
+            else:
+                focused.add_class("disabled")
 
     def action_approve(self):
-        approved_flags = [p.data for p in self.panels if not p.has_class("disabled")]
+        approved_flags = [flag for flag, enabled in self.flag_states.items() if enabled]
         self.exit(approved_flags)
 
     def action_reject(self):

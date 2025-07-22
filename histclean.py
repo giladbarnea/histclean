@@ -12,14 +12,17 @@ The central idea is that **every proposed change is an object that knows how to 
 
 The main reason for this design is to make the script easy to extend. Adding a new feature should feel like adding a new, self-contained module, not like performing surgery on the core logic.
 
+For the interactive UI (built with Textual), the philosophy extends to decoupling presentation from core logic: Flags handle their own rendering, the TUI collects user intents (e.g., toggles) without mutating data, and mutations are deferred until final approval.
+
 **2. The Lifecycle of a Change**
 
-Any change you propose will follow this four-step journey:
+Any change you propose will follow this five-step journey:
 
 1.  **Strategy:** A simple function that finds things to flag (e.g., `flag_duplicate_groups`).
 2.  **Instantiation:** The main loop creates a `Flag` object from your strategy's findings.
 3.  **Merging:** A central function resolves any overlaps between different `Flag` objects.
-4.  **Rendering & Application:** The UI asks your `Flag` object to `render()` itself and, if approved, asks it which indices to `get_indices_to_remove()`.
+4.  **Interactive Review:** The Textual UI displays rendered flags as panels, allowing navigation (up/down to focus/center), toggling (space to disable/enable via CSS class), and global approval (y/n).
+5.  **Rendering & Application:** If approved, the UI filters flags based on toggles and asks each approved `Flag` which indices to `get_indices_to_remove()` for final cleaning.
 
 **3. How to Add a New Cleaning Feature**
 
@@ -27,11 +30,11 @@ Let's say you want to add a feature to flag commands longer than 200 characters.
 
 1.  **Create the Strategy:** Write a new function, `flag_long_commands(all_entries)`, that yields the index of each long command.
 2.  **Create the `Flag` Class:** Create a new class, `LongCommandFlag(BaseFlag)`.
-    *   In its `render()` method, define how it should look on screen.
+    *   In its `render()` method, define how it should look on screen (e.g., a Panel with reason and entry display).
     *   In its `get_indices_to_remove()` method, tell the system which entry to remove.
 3.  **Add it to the Pipeline:** In `main()`, add your new strategy and class to the `pipeline_steps` list.
 
-That's it. Notice you didn't have to touch the complex merging, display, or removal logic. You just created a new, self-contained component and plugged it in.
+That's it. Notice you didn't have to touch the complex merging, display, or removal logic—or modify the Textual UI to support your new flag type. You just created a new, self-contained component and plugged it in; the interactive review will automatically render and allow toggling your new flags.
 """
 
 # ============================================================================

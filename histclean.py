@@ -73,6 +73,15 @@ from rich.syntax import Syntax, SyntaxTheme
 from rich.table import Table
 from rich.text import Text as RichText
 from rich.theme import Theme
+from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
+from textual.widgets import Static, Header, Footer
+from textual.events import Focus
+from textual import on
+from textual.binding import Binding
+
+class NonScrollableVerticalScroll(VerticalScroll):
+    BINDINGS = [b for b in VerticalScroll.BINDINGS if b.key not in ['up', 'down', 'pageup', 'pagedown', 'home', 'end']]
 
 # Define custom token types so Rich and Pygments know about them
 Name.Argument = Token.Name.Argument
@@ -385,14 +394,14 @@ class IndividualFlag(BaseFlag):
         # subclasses could call it with their specific data, reducing duplication while keeping the logic
         # centralized.
         meta_table = Table.grid(padding=(0, 2))
-        meta_table.add_column(style="reason")
+        meta_table.add_column(style=Style.parse("bold #98C379"))
         meta_table.add_column()
         meta_table.add_row("Reason(s):", self.reason_text)
         entry_cmd = remove_timestamp_from_entry(self.all_entries[self.entry_index])
 
         line_num = self.entry_line_nums[self.entry_index] + 1
         line_num_str = f"{line_num:>{self.max_line_num_width}}"
-        line_num_text = RichText(line_num_str, style="linenumber")
+        line_num_text = RichText(line_num_str, style="#3A3F4C")
 
         entry_syntax = Syntax(entry_cmd, "bash", theme="monokai", line_numbers=False)
 
@@ -407,7 +416,7 @@ class IndividualFlag(BaseFlag):
             meta_table,
             box=box.ROUNDED,
             title="[title]Flagged Entry[/title]",
-            border_style="border",
+            border_style="#4B5263",
             padding=(1, 2),
         )
 
@@ -431,17 +440,17 @@ class ClusterFlag(BaseFlag):
 
     def render(self) -> Panel:
         meta_table = Table.grid(padding=(0, 1, 1, 2))
-        meta_table.add_column(style="reason", no_wrap=True)
+        meta_table.add_column(style=Style.parse("bold #98C379"))
         meta_table.add_column()
         meta_table.add_row("Reason:", self.reason_text)
         meta_table.add_row(
             "Action:",
-            RichText("Keep only the last entry in the sequence", style="action"),
+            RichText("Keep only the last entry in the sequence", style="italic #61AFEF"),
         )
 
         entries_table = Table.grid(padding=(0, 1))
         entries_table.add_column(
-            width=self.max_line_num_width + 1, justify="right", style="linenumber"
+            width=self.max_line_num_width + 1, justify="right", style="#3A3F4C"
         )
         entries_table.add_column(width=2, justify="right")  # For diff markers
         entries_table.add_column()
@@ -450,7 +459,7 @@ class ClusterFlag(BaseFlag):
         if self.start_index > 0:
             before_idx = self.start_index - 1
             cmd = remove_timestamp_from_entry(self.all_entries[before_idx])
-            self._format_line(entries_table, before_idx, RichText(cmd, style="context"))
+            self._format_line(entries_table, before_idx, RichText(cmd, style="#5C6370"))
 
         # The cluster entries
         for i, entry_idx in enumerate(range(self.start_index, self.end_index + 1)):
@@ -460,18 +469,18 @@ class ClusterFlag(BaseFlag):
                 syntax = Syntax(cmd, "bash", theme="monokai", line_numbers=False)
                 self._format_line(entries_table, entry_idx, syntax, marker="+")
             else:
-                dimmed_syntax = RichText(cmd, style="context")
+                dimmed_syntax = RichText(cmd, style="#5C6370")
                 self._format_line(entries_table, entry_idx, dimmed_syntax, marker="-")
 
         # Context: entry after the cluster
         if self.end_index < len(self.all_entries) - 1:
             after_idx = self.end_index + 1
             cmd = remove_timestamp_from_entry(self.all_entries[after_idx])
-            self._format_line(entries_table, after_idx, RichText(cmd, style="context"))
+            self._format_line(entries_table, after_idx, RichText(cmd, style="#5C6370"))
 
         content_group = Group(
             meta_table,
-            Rule(style="rule"),
+            Rule(style="#4B5263"),
             entries_table,
         )
 
@@ -479,7 +488,7 @@ class ClusterFlag(BaseFlag):
             content_group,
             box=box.ROUNDED,
             title="[title]Similar Command Sequence[/title]",
-            border_style="border",
+            border_style="#4B5263",
             padding=(0, 1),
         )
 
@@ -502,17 +511,17 @@ class DuplicateFlag(BaseFlag):
 
     def render(self) -> Panel:
         meta_table = Table.grid(padding=(0, 1, 1, 2))
-        meta_table.add_column(style="reason", no_wrap=True)
+        meta_table.add_column(style=Style.parse("bold #98C379"))
         meta_table.add_column()
         meta_table.add_row("Reason:", self.reason_text)
         meta_table.add_row(
             "Action:",
-            RichText("Keep only the last entry in the sequence", style="action"),
+            RichText("Keep only the last entry in the sequence", style="italic #61AFEF"),
         )
 
         entries_table = Table.grid(padding=(0, 1))
         entries_table.add_column(
-            width=self.max_line_num_width + 1, justify="right", style="linenumber"
+            width=self.max_line_num_width + 1, justify="right", style="#3A3F4C"
         )
         entries_table.add_column(width=2, justify="right")
         entries_table.add_column()
@@ -524,12 +533,12 @@ class DuplicateFlag(BaseFlag):
                 syntax = Syntax(cmd, "bash", theme="monokai", line_numbers=False)
                 self._format_line(entries_table, entry_idx, syntax, marker="+")
             else:
-                dimmed_syntax = RichText(cmd, style="context")
+                dimmed_syntax = RichText(cmd, style="#5C6370")
                 self._format_line(entries_table, entry_idx, dimmed_syntax, marker="-")
 
         content_group = Group(
             meta_table,
-            Rule(style="rule"),
+            Rule(style="#4B5263"),
             entries_table,
         )
 
@@ -537,7 +546,7 @@ class DuplicateFlag(BaseFlag):
             content_group,
             box=box.ROUNDED,
             title="[title]Duplicate Commands[/title]",
-            border_style="border",
+            border_style="#4B5263",
             padding=(0, 1),
         )
 
@@ -947,6 +956,80 @@ def backup_and_write_history(
         sys.exit(1)
 
 
+class FocusableStatic(Static):
+    can_focus = True
+
+class HistoryCleanApp(App[bool]):
+    CSS = """
+    .panel {
+        margin: 1 2;
+        border: round $primary;
+    }
+    .panel:focus {
+        border: round #FF4500;
+    }
+    """
+
+    def __init__(self, flagged_entries: list[BaseFlag], *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flagged_entries = flagged_entries
+        self.panels: list[FocusableStatic] = []
+        self.scroll_container: VerticalScroll | None = None
+
+    BINDINGS = [
+        Binding("up", "focus_previous_panel", "Focus previous panel", priority=True),
+        Binding("down", "focus_next_panel", "Focus next panel", priority=True),
+        ("y", "approve", "Approve all changes"),
+        ("n", "reject", "Reject changes"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        self.scroll_container = NonScrollableVerticalScroll()
+        with self.scroll_container:
+            for entry in self.flagged_entries:
+                panel_widget = FocusableStatic(entry.render(), classes="panel")
+                yield panel_widget
+                self.panels.append(panel_widget)
+        yield Footer()
+
+    def on_mount(self):
+        if self.panels:
+            self.panels[0].focus()
+            if self.scroll_container:
+                self.scroll_container.scroll_to_center(self.panels[0], animate=False)
+
+    @on(Focus)
+    def handle_focus(self, event: Focus):
+        if event.widget in self.panels and self.scroll_container:
+            self.scroll_container.scroll_to_center(event.widget)
+
+    def get_current_index(self) -> int:
+        focused = self.focused
+        if focused in self.panels:
+            return self.panels.index(focused)
+        return 0
+
+    def action_focus_previous_panel(self):
+        if not self.panels:
+            return
+        current_idx = self.get_current_index()
+        next_idx = (current_idx - 1) % len(self.panels)
+        self.panels[next_idx].focus()
+
+    def action_focus_next_panel(self):
+        if not self.panels:
+            return
+        current_idx = self.get_current_index()
+        next_idx = (current_idx + 1) % len(self.panels)
+        self.panels[next_idx].focus()
+
+    def action_approve(self):
+        self.exit(True)
+
+    def action_reject(self):
+        self.exit(False)
+
 def main() -> None:
     """→ Main: Orchestrates the entire cleaning pipeline"""
     if len(sys.argv) > 1:
@@ -1028,7 +1111,8 @@ def main() -> None:
         return
 
     # --- PHASE 3: CONFIRM & APPLY ---
-    user_approved_all = display_and_confirm_all_changes(final_flagged_entries)
+    app = HistoryCleanApp(final_flagged_entries)
+    user_approved_all = app.run()
 
     if not user_approved_all:
         _console_print("[warning]No changes applied. History file unchanged.[/warning]")

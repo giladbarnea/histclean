@@ -76,15 +76,21 @@ from rich.syntax import Syntax, SyntaxTheme
 from rich.table import Table
 from rich.text import Text as RichText
 from rich.theme import Theme
-from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
-from textual.widgets import Static, Header, Footer
-from textual.events import Focus
 from textual import on
+from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import VerticalScroll
+from textual.events import Focus
+from textual.widgets import Footer, Header, Static
+
 
 class NonScrollableVerticalScroll(VerticalScroll):
-    BINDINGS = [b for b in VerticalScroll.BINDINGS if b.key not in ['up', 'down', 'pageup', 'pagedown', 'home', 'end']]
+    BINDINGS = [
+        b
+        for b in VerticalScroll.BINDINGS
+        if b.key not in ["up", "down", "pageup", "pagedown", "home", "end"]
+    ]
+
 
 # Define custom token types so Rich and Pygments know about them
 Name.Argument = Token.Name.Argument
@@ -833,27 +839,30 @@ def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
     return sorted(final_flags, key=lambda flag: flag.get_sort_key())
 
 
-def filter_flags_by_hist_keep(flagged_entries: list[BaseFlag], all_entries: list[list[str]]) -> list[BaseFlag]:
+def filter_flags_by_hist_keep(
+    flagged_entries: list[BaseFlag], all_entries: list[list[str]]
+) -> list[BaseFlag]:
     """→ Processing: Filters flags to exclude entries marked with HIST:KEEP"""
+
     def has_hist_keep(index: int) -> bool:
         if index >= len(all_entries):
             return False
         command = remove_timestamp_from_entry(all_entries[index])
         return bool(re.search(r"# *HIST:KEEP", command, re.IGNORECASE))
-    
+
     filtered_flags = []
-    
+
     for flag in flagged_entries:
         if isinstance(flag, IndividualFlag):
             # Remove individual flags for HIST:KEEP entries
             if not has_hist_keep(flag.entry_index):
                 filtered_flags.append(flag)
-        
+
         elif isinstance(flag, ClusterFlag):
             # For clusters, check if any entries being removed have HIST:KEEP
             indices_to_remove = set(range(flag.start_index, flag.end_index))
             hist_keep_indices = {i for i in indices_to_remove if has_hist_keep(i)}
-            
+
             # If no HIST:KEEP entries in the removal set, keep the flag as-is
             if not hist_keep_indices:
                 filtered_flags.append(flag)
@@ -864,26 +873,28 @@ def filter_flags_by_hist_keep(flagged_entries: list[BaseFlag], all_entries: list
             # (the actual removal will be filtered later in calculate_indices_to_remove)
             else:
                 filtered_flags.append(flag)
-        
+
         elif isinstance(flag, DuplicateFlag):
             # Remove HIST:KEEP entries from the duplicate list, but keep the last entry
             non_hist_keep_indices = [i for i in flag.entry_indices if not has_hist_keep(i)]
-            
+
             # If we still have duplicates after filtering, keep the flag with updated indices
             if len(non_hist_keep_indices) > 1:
                 flag.entry_indices = non_hist_keep_indices
                 filtered_flags.append(flag)
             # If only one or zero entries remain, drop the flag
-    
+
     return filtered_flags
 
 
-def calculate_indices_to_remove(approved_flags: list[BaseFlag], all_entries: list[list[str]]) -> set[int]:
+def calculate_indices_to_remove(
+    approved_flags: list[BaseFlag], all_entries: list[list[str]]
+) -> set[int]:
     """→ Processing: Converts approved flags into a set of indices to remove, with final HIST:KEEP safety check"""
     indices_to_remove = set()
     for flag in approved_flags:
         indices_to_remove.update(flag.get_indices_to_remove())
-    
+
     # Final safety check: remove any HIST:KEEP entries that might have slipped through (e.g., in mixed clusters)
     filtered_indices = set()
     for index in indices_to_remove:
@@ -893,7 +904,7 @@ def calculate_indices_to_remove(approved_flags: list[BaseFlag], all_entries: lis
                 filtered_indices.add(index)
         else:
             filtered_indices.add(index)  # Keep invalid indices for error handling elsewhere
-    
+
     return filtered_indices
 
 
@@ -961,6 +972,7 @@ def backup_and_write_history(
 
 class FocusableStatic(Static):
     can_focus = True
+
 
 class HistoryCleanApp(App[list[BaseFlag]]):
     CSS = """
@@ -1048,6 +1060,7 @@ class HistoryCleanApp(App[list[BaseFlag]]):
 
     def action_reject(self):
         self.exit([])
+
 
 def main() -> None:
     """→ Main: Orchestrates the entire cleaning pipeline"""

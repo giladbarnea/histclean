@@ -959,7 +959,7 @@ def backup_and_write_history(
 class FocusableStatic(Static):
     can_focus = True
 
-class HistoryCleanApp(App[bool]):
+class HistoryCleanApp(App[list[BaseFlag]]):
     CSS = """
     .panel {
         margin: 1 2;
@@ -967,6 +967,9 @@ class HistoryCleanApp(App[bool]):
     }
     .panel:focus {
         border: round #FF4500;
+    }
+    .panel.disabled {
+        border: round #5C6370;
     }
     """
 
@@ -979,6 +982,7 @@ class HistoryCleanApp(App[bool]):
     BINDINGS = [
         Binding("up", "focus_previous_panel", "Focus previous panel", priority=True),
         Binding("down", "focus_next_panel", "Focus next panel", priority=True),
+        Binding("space", "toggle_panel", "Toggle panel"),
         ("y", "approve", "Approve all changes"),
         ("n", "reject", "Reject changes"),
     ]
@@ -990,6 +994,7 @@ class HistoryCleanApp(App[bool]):
             for entry in self.flagged_entries:
                 panel_widget = FocusableStatic(entry.render(), classes="panel")
                 yield panel_widget
+                panel_widget.data = entry
                 self.panels.append(panel_widget)
         yield Footer()
 
@@ -1024,11 +1029,17 @@ class HistoryCleanApp(App[bool]):
         next_idx = (current_idx + 1) % len(self.panels)
         self.panels[next_idx].focus()
 
+    def action_toggle_panel(self):
+        focused = self.focused
+        if isinstance(focused, FocusableStatic):
+            focused.toggle_class("disabled")
+
     def action_approve(self):
-        self.exit(True)
+        approved_flags = [p.data for p in self.panels if not p.has_class("disabled")]
+        self.exit(approved_flags)
 
     def action_reject(self):
-        self.exit(False)
+        self.exit([])
 
 def main() -> None:
     """→ Main: Orchestrates the entire cleaning pipeline"""
@@ -1112,13 +1123,13 @@ def main() -> None:
 
     # --- PHASE 3: CONFIRM & APPLY ---
     app = HistoryCleanApp(final_flagged_entries)
-    user_approved_all = app.run()
+    approved_flags = app.run() or []
 
-    if not user_approved_all:
+    if not approved_flags:
         _console_print("[warning]No changes applied. History file unchanged.[/warning]")
         return
 
-    indices_to_remove = calculate_indices_to_remove(final_flagged_entries, all_entries)
+    indices_to_remove = calculate_indices_to_remove(approved_flags, all_entries)
 
     # Build the final list of entries by keeping those not in the removal set.
     final_cleaned_entries = [

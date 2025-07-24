@@ -1115,7 +1115,7 @@ class FlagWidget(Widget):
                     yield Static(content, classes="content")
 
     def on_mount(self):
-        self.entry_widgets = [e for e in self.query(Entry) if 'context' not in e.classes]
+        self.entry_widgets = [e for e in self.query(Entry) if "context" not in e.classes]
 
 
 class HistoryCleanApp(App[list[BaseFlag]]):

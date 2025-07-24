@@ -1,0 +1,14 @@
+---
+description: Relevant every time the user requests modifications, fixes or new features
+alwaysApply: false
+---
+1. If the user requests a new feature, it's often multiple features packed into a single request. Break down the request using the following method:
+	1.1. If the feature is complex, break it down into the individual features that make it up.
+	1.2. Focus on each individual feature and ask: "What's practically required to implement this feature successfully?"
+	1.3. Based on your answer, break down each feature into smaller tasks.
+	1.4. Present the user with the task list and wait for their approval.
+2. After each change, run histclean-check.sh to format and check for errors.
+
+// note to self: the first item's latest version is in /llm-templates.git/code/breakdown-feature.md
+
+

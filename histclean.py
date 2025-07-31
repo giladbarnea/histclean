@@ -1,4 +1,4 @@
-#!/usr/bin/env /opt/homebrew/bin/uvx --with=rich,textual,pygments python
+#!/usr/bin/env /opt/homebrew/bin/uvx --with=textual,rich,pygments python3.13
 """
 histclean.py - Zsh history cleaning utility
 
@@ -50,35 +50,199 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, ClassVar, Iterator
+from typing import Callable, Iterator
 
+from pygments.lexer import RegexLexer, bygroups, include
+from pygments.token import (
+    Comment,
+    Error,
+    Generic,
+    Keyword,
+    Name,
+    Number,
+    Operator,
+    Punctuation,
+    String,
+    Text,
+    Token,
+)
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.rule import Rule
 from rich.style import Style
-from rich.syntax import Syntax
+from rich.syntax import Syntax, SyntaxTheme
 from rich.table import Table
 from rich.text import Text as RichText
 from rich.theme import Theme
 from textual import on
-from textual.app import App, ComposeResult, RenderableType
+from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.events import Focus
-from textual.reactive import reactive
-from textual.widget import Widget
-from textual.widgets import Footer, Header, Label, Static
-from zsh_lexer import MonokaiProTheme, ZshLexer
+from textual.widgets import Footer, Header, Static
 
 
 class NonScrollableVerticalScroll(VerticalScroll):
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS = [
         b
         for b in VerticalScroll.BINDINGS
         if b.key not in ["up", "down", "pageup", "pagedown", "home", "end"]
     ]
+
+
+# Define custom token types so Rich and Pygments know about them
+Name.Argument = Token.Name.Argument
+Name.Variable.Magic = Token.Name.Variable.Magic
+Keyword.Type = Token.Keyword.Type
+
+
+class ZshLexer(RegexLexer):
+    """
+    A robust, stateful Z-shell lexer for Pygments.
+    Use like so:
+    ```python
+    console = Console()
+    syntax = Syntax(sample, ZshLexer(), theme=MonokaiProTheme(), line_numbers=True)
+    console.print(syntax)
+    ```
+    """
+
+    name = "Z-shell"
+    aliases = ["zsh"]  # noqa: RUF012 ClassVar
+    filenames = ["*.zsh", "*.bash", "*.sh", ".zshrc", ".zprofile", "zshrc", "zprofile"]  # noqa: RUF012 ClassVar
+
+    flags = re.MULTILINE | re.DOTALL
+
+    tokens = {  # noqa: RUF012 ClassVar
+        # '_base' contains common patterns, now correctly ordered
+        "_base": [
+            (r"\\.", String.Escape),
+            # IMPORTANT: Arithmetic must be checked before command substitution
+            (r"\$\(\(", Operator, "arithmetic_expansion"),
+            (r"\$\(", String.Interpol, "command_substitution"),
+            (
+                r"\b(if|fi|else|elif|then|for|in|while|do|done|case|esac|function|select)\b",
+                Keyword.Reserved,
+            ),
+            (
+                r"\b(echo|printf|cd|pwd|export|unset|readonly|source|exit|return|break|continue)\b",
+                Name.Builtin,
+            ),
+            (r"\$\{", Name.Variable.Magic, "parameter_expansion"),
+            (r"\$[a-zA-Z0-9_@*#?$!~-]+", Name.Variable),
+            (r"'[^']*'", String.Single),
+            (r'"', String.Double, "string_double"),
+        ],
+        "root": [
+            (r"\s+", Text),
+            (r"(<<<|<<-?|>>?|<&|>&)?[0-9]*[<>]", Operator),
+            (r"\|\|?|&&|&", Operator),
+            (r"[;()\[\]{}]", Punctuation),
+            # IMPORTANT: Give numbers explicit priority
+            (r"\b[0-9]+\b", Number.Integer),
+            include("_base"),
+            (r"([a-zA-Z0-9_./-]+)", Name.Function, "cmdtail"),
+        ],
+        "cmdtail": [
+            (r"\n", Text, "#pop"),
+            (r"[|]", Operator, "#pop"),
+            (r"[;&]", Punctuation, "#pop"),
+            (r"\s+", Text),
+            (r"(?:--?|\+)[a-zA-Z0-9][\w-]*", Name.Attribute),
+            (r"=", Operator),
+            # IMPORTANT: Give numbers explicit priority
+            (r"\b[0-9]+\b", Number.Integer),
+            include("_base"),
+            (r"[^=\s;&|(){}<>\[\]]+", Name.Argument),
+        ],
+        "string_double": [
+            (r'"', String.Double, "#pop"),
+            (r'\\(["$`\\])', String.Escape),
+            include("_base"),
+        ],
+        "command_substitution": [
+            (r"\)", String.Interpol, "#pop"),
+            include("root"),
+        ],
+        "arithmetic_expansion": [
+            (r"\)\)", Operator, "#pop"),
+            (r"[-+*/%&|<>!=^]+", Operator.Word),
+            (r"\b[0-9]+\b", Number.Integer),
+            (r"[a-zA-Z_][a-zA-Z0-9_]*", Name.Variable),
+            (r"\s+", Text),
+        ],
+        "parameter_expansion": [
+            (r"\}", Name.Variable.Magic, "#pop"),
+            (r"\s+", Text),
+            # Nested constructs
+            (r"\$\{", Name.Variable.Magic, "#push"),
+            (r"\$\(", String.Interpol, "command_substitution"),
+            (r"\$\(\(", Operator, "arithmetic_expansion"),
+            # Match flags and the variable name together
+            (
+                r"(\([#@=a-zA-Z:?^]+\))([a-zA-Z_][a-zA-Z0-9_]*)",
+                bygroups(Keyword.Type, Name.Variable),
+            ),
+            # Match just a variable name if no flags
+            (r"[a-zA-Z_][a-zA-Z0-9_]*", Name.Variable),
+            # Operators for substitution, slicing, etc.
+            (r"[#%/:|~^]+", Operator),
+            # The rest is a pattern or other content
+            (r"[^}]+", Text),
+        ],
+    }
+
+
+class MonokaiProTheme(SyntaxTheme):
+    """Rich syntax-highlighting theme that matches Monokai Pro."""
+
+    _BLACK = "#2d2a2e"
+    _RED = "#ff6188"
+    _GREEN = "#a9dc76"
+    _YELLOW = "#ffd866"
+    _ORANGE = "#fc9867"
+    _PURPLE = "#ab9df2"
+    _CYAN = "#78dce8"
+    _WHITE = "#fcfcfa"
+    _COMMENT_GRAY = "#727072"
+
+    background_color = _BLACK
+    default_style = Style(color=_WHITE)
+
+    styles = {  # noqa: RUF012 ClassVar
+        # Zsh-specific additions with new, non-conflicting colors
+        Name.Function: Style(color=_GREEN, bold=True),  # git, curl
+        Name.Attribute: Style(color=_ORANGE),  # --long, -l
+        Name.Argument: Style(color=_PURPLE),  # a filename
+        Name.Variable.Magic: Style(color=_PURPLE),  # ${PATH}
+        Name.Builtin: Style(color=_CYAN, italic=True),
+        Number: Style(color=_CYAN),  # Colder color for numbers
+        Keyword.Type: Style(color=_CYAN, italic=True),  # For parameter flags like (f)
+        # Base styles
+        Text: Style(color=_WHITE),
+        Comment: Style(color=_COMMENT_GRAY, italic=True),
+        Keyword: Style(color=_RED, bold=True),
+        Operator: Style(color=_RED),
+        Operator.Word: Style(color=_RED),  # For +, -, * in arithmetic
+        Punctuation: Style(color=_WHITE),
+        Name.Variable: Style(color=_WHITE),
+        String: Style(color=_YELLOW),  # All strings are yellow
+        String.Escape: Style(color=_PURPLE),
+        String.Interpol: Style(color=_PURPLE, bold=True),
+        Error: Style(color=_RED, bold=True),
+        Generic.Emph: Style(italic=True),
+        Generic.Strong: Style(bold=True),
+    }
+
+    @classmethod
+    def get_style_for_token(cls, t):
+        return cls.styles.get(t, cls.default_style)
+
+    @classmethod
+    def get_background_style(cls):
+        return Style(bgcolor=cls._BLACK)
 
 
 # ============================================================================
@@ -86,21 +250,23 @@ class NonScrollableVerticalScroll(VerticalScroll):
 # ============================================================================
 
 # Define a custom theme for a polished, modern look inspired by high-end dev tools
-CUSTOM_THEME = Theme({
-    "title": "bold #C678DD",
-    "reason": "bold #98C379",
-    "action": "italic #61AFEF",
-    "context": "#5C6370",
-    "border": "#4B5263",
-    "rule": "#4B5263",
-    "diff.plus": "bold #61AFEF",
-    "diff.minus": "bold #E06C75",
-    "info": "#61AFEF",
-    "success": "#98C379",
-    "warning": "#E5C07B",
-    "error": "#E06C75",
-    "linenumber": "#3A3F4C",
-})
+CUSTOM_THEME = Theme(
+    {
+        "title": "bold #C678DD",
+        "reason": "bold #98C379",
+        "action": "italic #61AFEF",
+        "context": "#5C6370",
+        "border": "#4B5263",
+        "rule": "#4B5263",
+        "diff.plus": "bold #61AFEF",
+        "diff.minus": "bold #E06C75",
+        "info": "#61AFEF",
+        "success": "#98C379",
+        "warning": "#E5C07B",
+        "error": "#E06C75",
+        "linenumber": "#3A3F4C",
+    }
+)
 
 console = Console(stderr=True, theme=CUSTOM_THEME)
 
@@ -178,7 +344,6 @@ class BaseFlag(ABC):
         """Returns the set of entry indices to be removed."""
         raise NotImplementedError
 
-    @abstractmethod
     def render(self) -> Panel:
         """Returns a rich Panel object for display."""
         raise NotImplementedError
@@ -200,11 +365,6 @@ class BaseFlag(ABC):
         line_num_str = f"{line_num}"
         marker_text = RichText(marker, style=f"diff.{'plus' if marker == '+' else 'minus'}")
         table.add_row(line_num_str, marker_text, content_renderable)
-
-    @abstractmethod
-    def get_render_entries(self) -> list[tuple[str, str, RenderableType, bool, bool]]:
-        """Returns list of (line_num_str, marker, content, is_context, is_kept) for rendering."""
-        raise NotImplementedError
 
 
 class IndividualFlag(BaseFlag):
@@ -229,6 +389,19 @@ class IndividualFlag(BaseFlag):
         return {self.entry_index}
 
     def render(self) -> Panel:
+        # One clear instance of code duplication shows up in the render methods of ClusterFlag and
+        # DuplicateFlag. Both classes build very similar UI structures using Rich's Table and Group: they
+        # create a meta_table with "Reason" and "Action" rows, then an entries_table with line numbers,
+        # markers ("+" or "-"), and command displays. The logic for handling context lines, dimming non-kept
+        # entries, and formatting with Syntax or RichText is nearly identical, down to the Rule separator and
+        # Panel wrapping. Even the title formats are close ("Similar Command Sequence" vs. "Duplicate
+        # Commands"). This repetition means that if you ever need to tweak the display format—say, to add
+        # timestamps or change styling—you'd have to update both places, which increases the risk of
+        # inconsistencies or forgotten changes. A good fix could be to extract a shared rendering helper
+        # method into BaseFlag, perhaps something like _render_sequence_panel(self, indices_to_display,
+        # kept_index), where you pass in the list of indices and which one to mark as kept. That way, both
+        # subclasses could call it with their specific data, reducing duplication while keeping the logic
+        # centralized.
         meta_table = Table.grid(padding=(0, 2))
         meta_table.add_column(style=Style.parse("bold #98C379"))
         meta_table.add_column()
@@ -255,14 +428,6 @@ class IndividualFlag(BaseFlag):
             border_style="#4B5263",
             padding=(1, 2),
         )
-
-    def get_render_entries(self) -> list[tuple[str, str, RenderableType, bool, bool]]:
-        entry_idx = self.entry_index
-        cmd = remove_timestamp_from_entry(self.all_entries[entry_idx])
-        syntax = Syntax(cmd, ZshLexer(), theme=MonokaiProTheme(), line_numbers=False)
-        line_num = self.entry_line_nums[entry_idx] + 1
-        line_num_str = f"{line_num:>{self.max_line_num_width}}"
-        return [(line_num_str, "-", syntax, False, False)]
 
 
 class ClusterFlag(BaseFlag):
@@ -336,41 +501,6 @@ class ClusterFlag(BaseFlag):
             padding=(0, 1),
         )
 
-    def get_render_entries(self) -> list[tuple[str, str, RenderableType, bool, bool]]:
-        entries: list[tuple[str, str, RenderableType, bool, bool]] = []
-
-        # Context: entry before the cluster
-        if self.start_index > 0:
-            before_idx = self.start_index - 1
-            cmd = remove_timestamp_from_entry(self.all_entries[before_idx])
-            line_num = self.entry_line_nums[before_idx] + 1
-            line_num_str = f"{line_num:>{self.max_line_num_width}}"
-            entries.append((line_num_str, "", RichText(cmd), True, False))
-
-        # The cluster entries
-        for i in range(self.start_index, self.end_index + 1):
-            is_last = i == self.end_index
-            cmd = remove_timestamp_from_entry(self.all_entries[i])
-            line_num = self.entry_line_nums[i] + 1
-            line_num_str = f"{line_num:>{self.max_line_num_width}}"
-            marker = "+" if is_last else "-"
-            content = (
-                Syntax(cmd, ZshLexer(), theme=MonokaiProTheme(), line_numbers=False)
-                if is_last
-                else RichText(cmd)
-            )
-            entries.append((line_num_str, marker, content, False, is_last))
-
-        # Context: entry after the cluster
-        if self.end_index < len(self.all_entries) - 1:
-            after_idx = self.end_index + 1
-            cmd = remove_timestamp_from_entry(self.all_entries[after_idx])
-            line_num = self.entry_line_nums[after_idx] + 1
-            line_num_str = f"{line_num:>{self.max_line_num_width}}"
-            entries.append((line_num_str, "", RichText(cmd), True, False))
-
-        return entries
-
 
 class DuplicateFlag(BaseFlag):
     """Represents a group of duplicate commands to be collapsed."""
@@ -429,24 +559,6 @@ class DuplicateFlag(BaseFlag):
             padding=(0, 1),
         )
 
-    def get_render_entries(self) -> list[tuple[str, str, RenderableType, bool, bool]]:
-        entries: list[tuple[str, str, RenderableType, bool, bool]] = []
-
-        for i, entry_idx in enumerate(self.entry_indices):
-            is_last = i == len(self.entry_indices) - 1
-            cmd = remove_timestamp_from_entry(self.all_entries[entry_idx])
-            line_num = self.entry_line_nums[entry_idx] + 1
-            line_num_str = f"{line_num:>{self.max_line_num_width}}"
-            marker = "+" if is_last else "-"
-            content = (
-                Syntax(cmd, ZshLexer(), theme=MonokaiProTheme(), line_numbers=False)
-                if is_last
-                else RichText(cmd)
-            )
-            entries.append((line_num_str, marker, content, False, is_last))
-
-        return entries
-
 
 # ============================================================================
 # PARSING & UTILITIES
@@ -497,41 +609,6 @@ def remove_timestamp_from_entry(entry_block: list[str]) -> str:
 def _ask_yes_no(prompt_text: str) -> bool:
     """→ Helper function to ask a yes/no question and return a boolean"""
     return Confirm.ask(prompt_text, console=console, default=False)
-
-
-def read_history_file(file_path: Path) -> list[str] | None:
-    """→ File I/O: Reads the history file and returns its lines, handling errors"""
-    try:
-        return file_path.read_text(errors="ignore").splitlines()
-    except FileNotFoundError:
-        _console_print(f"[error]Error: History file not found at '{file_path}'[/error]\n")
-        return None
-    except IOError as e:
-        _console_print(f"[error]Error reading file '{file_path}': {e}[/error]\n")
-        return None
-
-
-def backup_and_write_history(
-    history_path: Path, cleaned_lines: list[str], original_lines: list[str]
-) -> None:
-    """→ File I/O: Saves a backup and writes the new cleaned history file"""
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    backup_filename = history_path.parent / f".zsh_hist.clean.{timestamp}"
-    try:
-        with backup_filename.open("w", encoding="utf-8") as f:
-            f.write("\n".join(original_lines) + "\n")
-        _console_print(f"Backup saved to [info]{backup_filename}[/info]\n")
-    except IOError as e:
-        _console_print(f"[error]Error writing to backup file {backup_filename}: {e!r}[/error]\n")
-        # Do not exit, we can still try to write the main file
-
-    try:
-        with history_path.open("w", encoding="utf-8") as f:
-            f.write("\n".join(cleaned_lines) + "\n")
-        _console_print(f"Cleaned history saved to [success]{history_path}[/success]\n")
-    except IOError as e:
-        _console_print(f"[error]Error writing to history file {history_path}: {e!r}[/error]\n")
-        sys.exit(1)
 
 
 # ============================================================================
@@ -853,113 +930,52 @@ def display_and_confirm_all_changes(flagged_entries: list[BaseFlag]) -> bool:
     return _ask_yes_no(f"Apply all {num_changes} changes above?")
 
 
-class Entry(Horizontal):
-    """A single entry row in the flag display."""
+# ============================================================================
+# FILE I/O & MAIN LOGIC
+# ============================================================================
 
-    DEFAULT_CSS = """
-    Entry {
-        layout: horizontal;
-        height: auto;
-    }
-    Entry:focus {
-        background: #FF4500 20%;
-    }
-    Entry.context {
-        color: #5C6370;
-    }
-    Entry .line-num {
-        width: auto;
-        text-align: right;
-        color: #3A3F4C;
-        padding: 0 1;
-    }
-    Entry .marker {
-        width: 2;
-        text-align: right;
-    }
-    Entry .marker.plus {
-        color: #61AFEF;
-    }
-    Entry .marker.minus {
-        color: #E06C75;
-    }
-    Entry .content {
-        padding: 0 1;
-    }
-    """
 
+def read_history_file(file_path: Path) -> list[str] | None:
+    """→ File I/O: Reads the history file and returns its lines, handling errors"""
+    try:
+        return file_path.read_text(errors="ignore").splitlines()
+    except FileNotFoundError:
+        _console_print(f"[error]Error: History file not found at '{file_path}'[/error]\n")
+        return None
+    except IOError as e:
+        _console_print(f"[error]Error reading file '{file_path}': {e}[/error]\n")
+        return None
+
+
+def backup_and_write_history(
+    history_path: Path, cleaned_lines: list[str], original_lines: list[str]
+) -> None:
+    """→ File I/O: Saves a backup and writes the new cleaned history file"""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    backup_filename = history_path.parent / f".zsh_hist.clean.{timestamp}"
+    try:
+        with backup_filename.open("w", encoding="utf-8") as f:
+            f.write("\n".join(original_lines) + "\n")
+        _console_print(f"Backup saved to [info]{backup_filename}[/info]\n")
+    except IOError as e:
+        _console_print(f"[error]Error writing to backup file {backup_filename}: {e!r}[/error]\n")
+        # Do not exit, we can still try to write the main file
+
+    try:
+        with history_path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(cleaned_lines) + "\n")
+        _console_print(f"Cleaned history saved to [success]{history_path}[/success]\n")
+    except IOError as e:
+        _console_print(f"[error]Error writing to history file {history_path}: {e!r}[/error]\n")
+        sys.exit(1)
+
+
+class FocusableStatic(Static):
     can_focus = True
-
-
-class FlagWidget(Widget):
-    """A widget to display a single flag with composable entry rows."""
-
-    can_focus = True
-
-    DEFAULT_CSS = """
-    FlagWidget {
-        padding: 0 1;
-        margin: 1 2;
-        border: round $primary;
-    }
-    FlagWidget:focus {
-        border: round #FF4500;
-    }
-    FlagWidget.disabled {
-        border: round #5C6370;
-    }
-    FlagWidget .entries {
-        height: auto;
-    }
-    """
-
-    def __init__(self, flag: BaseFlag, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.flag = flag
-        self.entry_widgets: list[Entry] = []
-
-    def compose(self) -> ComposeResult:
-        meta_table = Table.grid(padding=(0, 1, 1, 2))
-        meta_table.add_column(style=Style.parse("bold #98C379"))
-        meta_table.add_column()
-        meta_table.add_row("Reason:", self.flag.reason_text)
-        if isinstance(self.flag, (ClusterFlag, DuplicateFlag)):
-            meta_table.add_row(
-                "Action:",
-                RichText("Keep only the last entry in the sequence", style="italic #61AFEF"),
-            )
-        elif isinstance(self.flag, IndividualFlag):
-            meta_table.add_row(
-                "Action:",
-                RichText("Remove this entry", style="italic #61AFEF"),
-            )
-
-        yield Static(meta_table)
-        yield Static(Rule(style="#4B5263"))
-
-        with Vertical(classes="entries"):
-            for (
-                line_num_str,
-                marker,
-                content,
-                is_context,
-                is_kept,
-            ) in self.flag.get_render_entries():
-                with Entry(classes="context" if is_context else ""):
-                    yield Label(line_num_str, classes="line-num")
-                    yield Label(marker, classes=f"marker {'plus' if is_kept else 'minus'}")
-                    yield Static(content, classes="content")
-
-    def on_mount(self):
-        self.entry_widgets = [e for e in self.query(Entry) if "context" not in e.classes]
 
 
 class HistoryCleanApp(App[list[BaseFlag]]):
     CSS = """
-    #scroll {
-        height: 1fr;
-        overflow: auto scroll;
-    }
     .panel {
         margin: 1 2;
         border: round $primary;
@@ -972,34 +988,27 @@ class HistoryCleanApp(App[list[BaseFlag]]):
     }
     """
 
-    mode = reactive("flag")
-    current_flag: FlagWidget | None = None
-    current_entries: list[Entry]
-
     def __init__(self, flagged_entries: list[BaseFlag], *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.flagged_entries = flagged_entries
-        self.current_entries = []
-        self.panels: list[FlagWidget] = []
+        self.panels: list[FocusableStatic] = []
         self.scroll_container: VerticalScroll | None = None
         self.flag_states: dict[BaseFlag, bool] = {flag: True for flag in flagged_entries}
 
-    BINDINGS: ClassVar[list[Binding]] = [
-        Binding("up", "focus_previous", "Focus previous", priority=True),
-        Binding("down", "focus_next", "Focus next", priority=True),
+    BINDINGS = [
+        Binding("up", "focus_previous_panel", "Focus previous panel", priority=True),
+        Binding("down", "focus_next_panel", "Focus next panel", priority=True),
         Binding("space", "toggle_panel", "Toggle panel"),
-        Binding("enter", "enter_entry_mode", "Enter Entry Mode"),
-        Binding("escape", "exit_entry_mode", "Exit Entry Mode", show=False),
         ("y", "approve", "Approve all changes"),
         ("n", "reject", "Reject changes"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Header()
-        self.scroll_container = NonScrollableVerticalScroll(id="scroll")
+        self.scroll_container = NonScrollableVerticalScroll()
         with self.scroll_container:
             for entry in self.flagged_entries:
-                panel_widget = FlagWidget(entry, classes="panel")
+                panel_widget = FocusableStatic(entry.render(), classes="panel")
                 yield panel_widget
                 panel_widget.flag = entry
                 self.panels.append(panel_widget)
@@ -1013,76 +1022,37 @@ class HistoryCleanApp(App[list[BaseFlag]]):
 
     @on(Focus)
     def handle_focus(self, event: Focus):
-        if self.scroll_container:
+        if event.widget in self.panels and self.scroll_container:
             self.scroll_container.scroll_to_center(event.widget)
 
-    def get_current_panel_index(self) -> int:
+    def get_current_index(self) -> int:
         focused = self.focused
-        if isinstance(focused, FlagWidget):
+        if focused in self.panels:
             return self.panels.index(focused)
         return 0
 
-    def action_focus_previous(self):
+    def action_focus_previous_panel(self):
         if not self.panels:
             return
-        if self.mode == "flag":
-            current_idx = self.get_current_panel_index()
-            next_idx = (current_idx - 1) % len(self.panels)
-            self.panels[next_idx].focus()
-        elif self.mode == "entry" and self.current_entries:
-            focused = self.focused
-            if isinstance(focused, Entry):
-                current_idx = self.current_entries.index(focused)
-                if current_idx > 0:
-                    self.current_entries[current_idx - 1].focus()
+        current_idx = self.get_current_index()
+        next_idx = (current_idx - 1) % len(self.panels)
+        self.panels[next_idx].focus()
 
-    def action_focus_next(self):
+    def action_focus_next_panel(self):
         if not self.panels:
             return
-        if self.mode == "flag":
-            current_idx = self.get_current_panel_index()
-            next_idx = (current_idx + 1) % len(self.panels)
-            self.panels[next_idx].focus()
-        elif self.mode == "entry" and self.current_entries:
-            focused = self.focused
-            if isinstance(focused, Entry):
-                current_idx = self.current_entries.index(focused)
-                if current_idx < len(self.current_entries) - 1:
-                    self.current_entries[current_idx + 1].focus()
+        current_idx = self.get_current_index()
+        next_idx = (current_idx + 1) % len(self.panels)
+        self.panels[next_idx].focus()
 
     def action_toggle_panel(self):
-        if self.mode == "flag":
-            focused = self.focused
-        elif self.mode == "entry" and self.current_flag:
-            focused = self.current_flag
-        else:
-            return
-
-        if isinstance(focused, FlagWidget) and (flag := focused.flag):
+        focused = self.focused
+        if isinstance(focused, FocusableStatic) and (flag := focused.flag):
             self.flag_states[flag] = not self.flag_states[flag]
             if self.flag_states[flag]:
                 focused.remove_class("disabled")
             else:
                 focused.add_class("disabled")
-
-    def action_enter_entry_mode(self):
-        focused = self.focused
-        if self.mode == "flag" and isinstance(focused, FlagWidget):
-            self.mode = "entry"
-            self.current_flag = focused
-            self.current_entries = focused.entry_widgets
-            if self.current_entries:
-                self.current_entries[0].focus()
-                if self.scroll_container:
-                    self.scroll_container.scroll_to_center(self.current_entries[0])
-
-    def action_exit_entry_mode(self):
-        if self.mode == "entry" and self.current_flag:
-            self.mode = "flag"
-            self.current_flag.focus()
-            if self.scroll_container:
-                self.scroll_container.scroll_to_center(self.current_flag)
-            self.current_entries = []
 
     def action_approve(self):
         approved_flags = [flag for flag, enabled in self.flag_states.items() if enabled]
@@ -1131,11 +1101,13 @@ def main() -> None:
         }
         for strategy, reason in CONFIG.cluster_strategies
     )
-    pipeline_steps.append({
-        "flag_class": DuplicateFlag,
-        "strategy": CONFIG.duplicate_strategy,
-        "reason": "Duplicate command; keeping the last instance",
-    })
+    pipeline_steps.append(
+        {
+            "flag_class": DuplicateFlag,
+            "strategy": CONFIG.duplicate_strategy,
+            "reason": "Duplicate command; keeping the last instance",
+        }
+    )
 
     # --- PHASE 1: COLLECT ---
     raw_flagged_entries: list[BaseFlag] = []

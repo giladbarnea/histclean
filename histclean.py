@@ -35,6 +35,10 @@ Let's say you want to add a feature to flag commands longer than 200 characters.
 3.  **Add it to the Pipeline:** In `main()`, add your new strategy and class to the `pipeline_steps` list.
 
 That's it. Notice you didn't have to touch the complex merging, display, or removal logic—or modify the Textual UI to support your new flag type. You just created a new, self-contained component and plugged it in; the interactive review will automatically render and allow toggling your new flags.
+
+## Known Issues
+
+1. When entries are merged into a cluster, the last entry is always kept, even if it should also be flagged individually for removal. This is a bug in the merge logic. For example, if lines 1–4 a flagged as a cluster, line 4 is kept by design. But if line 4 is multiline, it would be removed if it stood alone. Because it’s in part of a cluster, it bypasses the individual multiline flag and is incorrectly kept. This dynamic is generally true (not limited to any specific strategy.)
 """
 
 # ============================================================================
@@ -250,23 +254,21 @@ class MonokaiProTheme(SyntaxTheme):
 # ============================================================================
 
 # Define a custom theme for a polished, modern look inspired by high-end dev tools
-CUSTOM_THEME = Theme(
-    {
-        "title": "bold #C678DD",
-        "reason": "bold #98C379",
-        "action": "italic #61AFEF",
-        "context": "#5C6370",
-        "border": "#4B5263",
-        "rule": "#4B5263",
-        "diff.plus": "bold #61AFEF",
-        "diff.minus": "bold #E06C75",
-        "info": "#61AFEF",
-        "success": "#98C379",
-        "warning": "#E5C07B",
-        "error": "#E06C75",
-        "linenumber": "#3A3F4C",
-    }
-)
+CUSTOM_THEME = Theme({
+    "title": "bold #C678DD",
+    "reason": "bold #98C379",
+    "action": "italic #61AFEF",
+    "context": "#5C6370",
+    "border": "#4B5263",
+    "rule": "#4B5263",
+    "diff.plus": "bold #61AFEF",
+    "diff.minus": "bold #E06C75",
+    "info": "#61AFEF",
+    "success": "#98C379",
+    "warning": "#E5C07B",
+    "error": "#E06C75",
+    "linenumber": "#3A3F4C",
+})
 
 console = Console(stderr=True, theme=CUSTOM_THEME)
 
@@ -602,7 +604,7 @@ def remove_timestamp_from_entry(entry_block: list[str]) -> str:
     first_line = entry_block[0]
     if HISTORY_ENTRY_RE.match(first_line):
         command_part = first_line.split(";", 1)[1]
-        return "\n".join([command_part] + entry_block[1:])
+        return "\n".join([command_part, *entry_block[1:]])
     return "\n".join(entry_block)
 
 
@@ -951,7 +953,7 @@ def backup_and_write_history(
     history_path: Path, cleaned_lines: list[str], original_lines: list[str]
 ) -> None:
     """→ File I/O: Saves a backup and writes the new cleaned history file"""
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
     backup_filename = history_path.parent / f".zsh_hist.clean.{timestamp}"
     try:
         with backup_filename.open("w", encoding="utf-8") as f:
@@ -1072,6 +1074,11 @@ def main() -> None:
     original_lines = read_history_file(history_file_path)
     if original_lines is None:
         sys.exit(1)
+    if not [line for line in original_lines if line.strip()]:
+        _console_print(
+            "[warning]History file is empty, or made of only empty lines. Nothing to clean.[/warning]"
+        )
+        return
 
     all_entries_with_lines = list(parse_history_entries(original_lines))
     all_entries = [block for _, block in all_entries_with_lines]
@@ -1101,13 +1108,11 @@ def main() -> None:
         }
         for strategy, reason in CONFIG.cluster_strategies
     )
-    pipeline_steps.append(
-        {
-            "flag_class": DuplicateFlag,
-            "strategy": CONFIG.duplicate_strategy,
-            "reason": "Duplicate command; keeping the last instance",
-        }
-    )
+    pipeline_steps.append({
+        "flag_class": DuplicateFlag,
+        "strategy": CONFIG.duplicate_strategy,
+        "reason": "Duplicate command; keeping the last instance",
+    })
 
     # --- PHASE 1: COLLECT ---
     raw_flagged_entries: list[BaseFlag] = []
@@ -1167,8 +1172,28 @@ def main() -> None:
 
     backup_and_write_history(history_file_path, cleaned_lines, original_lines)
 
-    removed_count = len(all_entries) - len(final_cleaned_entries)
-    _console_print(f"[success]Cleaned history: removed {removed_count} entries.[/success]")
+    # For stats, flatten both entries lists to list[str]
+    all_entries_flat: list[bytes] = [
+        line.encode("utf-8", errors="ignore") for entry in all_entries for line in entry
+    ]
+    final_cleaned_entries_flat: list[bytes] = [
+        line.encode("utf-8", errors="ignore") for entry in final_cleaned_entries for line in entry
+    ]
+    # calculate how many raw lines were removed
+    raw_lines_removed: int = len(all_entries_flat) - len(final_cleaned_entries_flat)
+    raw_lines_removed_formatted: str = f"{raw_lines_removed / len(all_entries_flat) * 100:.2f}%"
+
+    # Use memoryview to calculate total bytes removed
+    all_entries_bytes: int = memoryview(b"\n".join(all_entries_flat)).nbytes
+    final_cleaned_entries_bytes: int = memoryview(b"\n".join(final_cleaned_entries_flat)).nbytes
+    total_bytes_removed: int = all_entries_bytes - final_cleaned_entries_bytes
+    total_bytes_removed_formatted: str = f"{total_bytes_removed / all_entries_bytes * 100:.2f}%"
+
+    removed_count: int = len(all_entries) - len(final_cleaned_entries)
+    removed_percentage_formatted: str = f"{removed_count / len(all_entries) * 100:.2f}%"
+    _console_print(
+        f"[success]Cleaned history: removed {removed_count} entries ({removed_percentage_formatted}), {raw_lines_removed} lines ({raw_lines_removed_formatted}), {total_bytes_removed} bytes ({total_bytes_removed_formatted}).[/success]"
+    )
 
 
 if __name__ == "__main__":

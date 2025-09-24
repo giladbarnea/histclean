@@ -5,3 +5,6 @@ textual-docs/*.svg
 textual-docs/*.jpeg
 textual-docs/*.jpg
 textual-docs/*.mp4
+
+.gemini/
+gha-creds-*.json

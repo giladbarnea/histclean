@@ -1,4 +1,4 @@
-#!/usr/bin/env /opt/homebrew/bin/uvx --with=textual,rich,pygments python3.13
+#!/usr/bin/env uvx --with=textual,rich,pygments python3.13
 """
 histclean.py - Zsh history cleaning utility
 
@@ -303,6 +303,7 @@ class Config:
             flag_individual_multiline,
             flag_individual_empty,
             flag_individual_blacklist,
+            flag_individual_orphaned_backslash,
         ]
 
     @property
@@ -639,6 +640,20 @@ def flag_individual_blacklist(all_entries: list[list[str]]) -> Iterator[tuple[in
         command = remove_timestamp_from_entry(entry_block)
         if match := next((pattern.search(command) for pattern in BLACKLIST_PATTERNS), None):
             yield i, f"Matches '{match.group()}'"
+
+
+def flag_individual_orphaned_backslash(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+    """→ Individual strategy: Flags entries ending with backslash that don't continue to next line"""
+    for i, entry_block in enumerate(all_entries):
+        command = remove_timestamp_from_entry(entry_block)
+        # Check if command ends with backslash
+        if command.rstrip().endswith("\\"):
+            # Check if there's a next entry
+            if i + 1 < len(all_entries):
+                next_entry_block = all_entries[i + 1]
+                # If next entry starts with timestamp pattern, this backslash is orphaned
+                if next_entry_block and HISTORY_ENTRY_RE.match(next_entry_block[0]):
+                    yield i, "Entry ends with orphaned backslash (line continuation not found)"
 
 
 def flag_duplicate_groups(all_entries: list[list[str]]) -> Iterator[list[int]]:

@@ -1,4 +1,11 @@
-#!/usr/bin/env uvx --with=textual,rich,pygments python3.13
+#!/usr/bin/env uv run
+# /// script
+# dependencies = [
+#     "textual",
+#     "rich",
+#     "pygments"
+# ]
+# ///
 """
 histclean.py - Zsh history cleaning utility
 

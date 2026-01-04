@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env uv run
 """
 Merge-sort zsh history snapshots and emit the union.
 
 Discovery
 - Finds files via glob: ".zsh_history.*" in CWD and HOME, then filters to
-  numeric snapshots matching r"^\.zsh_history\.\d+$". Includes the live
+  numeric snapshots matching r"^\.zsh_history\.(shrinkbackup\.)?\d+$". Includes the live
   ".zsh_history" if present. Explicit CLI paths override discovery.
 
 Behavior
@@ -37,7 +37,7 @@ from typing import Iterable, List, Set, Tuple
 DEFAULT_FILES: List[str] = []
 
 
-SNAP_RE = re.compile(r"^\.zsh_history\.(\d+)$")
+SNAP_RE = re.compile(r"^\.zsh_history\.(?:shrinkbackup\.)?(\d+)$")
 EXT_LINE_RE = re.compile(r"^:\s*(\d+)\:(\d+)\;.*")
 
 

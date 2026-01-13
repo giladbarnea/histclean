@@ -866,13 +866,13 @@ def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
 def filter_flags_by_hist_keep(
     flagged_entries: list[BaseFlag], all_entries: list[list[str]]
 ) -> list[BaseFlag]:
-    """→ Processing: Filters flags to exclude entries marked with HIST:KEEP"""
+    """→ Processing: Filters flags to exclude entries marked with # !keep"""
 
     def has_hist_keep(index: int) -> bool:
         if index >= len(all_entries):
             return False
         command = remove_timestamp_from_entry(all_entries[index])
-        return bool(re.search(r"# *HIST:KEEP", command, re.IGNORECASE))
+        return bool(re.search(r"#\s*!keep\b", command, re.IGNORECASE))
 
     filtered_flags = []
 
@@ -914,17 +914,17 @@ def filter_flags_by_hist_keep(
 def calculate_indices_to_remove(
     approved_flags: list[BaseFlag], all_entries: list[list[str]]
 ) -> set[int]:
-    """→ Processing: Converts approved flags into a set of indices to remove, with final HIST:KEEP safety check"""
+    """→ Processing: Converts approved flags into a set of indices to remove, with final !keep safety check"""
     indices_to_remove = set()
     for flag in approved_flags:
         indices_to_remove.update(flag.get_indices_to_remove())
 
-    # Final safety check: remove any HIST:KEEP entries that might have slipped through (e.g., in mixed clusters)
+    # Final safety check: remove any !keep entries that might have slipped through (e.g., in mixed clusters)
     filtered_indices = set()
     for index in indices_to_remove:
         if index < len(all_entries):
             command = remove_timestamp_from_entry(all_entries[index])
-            if not re.search(r"# *HIST:KEEP", command, re.IGNORECASE):
+            if not re.search(r"#\s*!keep\b", command, re.IGNORECASE):
                 filtered_indices.add(index)
         else:
             filtered_indices.add(index)  # Keep invalid indices for error handling elsewhere

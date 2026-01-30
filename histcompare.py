@@ -597,11 +597,19 @@ def generate_html(result: AnalysisResult) -> str:
             width: 1px;
             z-index: 30;
         }}
-        .timeline-marker:hover {{
+        .timeline-marker:hover,
+        .timeline-marker.active {{
             background: #fff;
             width: 2px;
             z-index: 40;
             box-shadow: 0 0 4px rgba(255,255,255,0.5);
+        }}
+        .timeline-bar.related {{
+            box-shadow: 0 0 15px 3px rgba(255, 255, 255, 0.6);
+            filter: brightness(1.4);
+            transform: scaleY(1.15);
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            z-index: 15;
         }}
         .cat-main {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -805,6 +813,8 @@ def generate_html(result: AnalysisResult) -> str:
 
             bar.style.left = `${{left}}%`;
             bar.style.width = `${{width}}%`;
+            bar.dataset.start = item.start;
+            bar.dataset.end = item.end;
 
             const durationDays = Math.round((item.end - item.start) / 86400);
             bar.textContent = `${{durationDays}}d`;
@@ -818,6 +828,26 @@ def generate_html(result: AnalysisResult) -> str:
             // Bar tooltip
             bar.addEventListener('mouseenter', (e) => {{
                 if (hideTimeout) clearTimeout(hideTimeout);
+                
+                // Highlight related bars
+                const allBars = document.querySelectorAll('.timeline-bar');
+                allBars.forEach(b => {{
+                    if (b === bar) return;
+                    const bStart = parseInt(b.dataset.start);
+                    const bEnd = parseInt(b.dataset.end);
+                    if (bStart === item.start || bStart === item.end || bEnd === item.start || bEnd === item.end) {{
+                        b.classList.add('related');
+                    }}
+                }});
+
+                // Highlight related markers
+                [item.start, item.end].forEach(ts => {{
+                    const marker = document.querySelector(`.timeline-marker[data-ts="${{ts}}"]`);
+                    if (marker && marker.classList.contains('aligned')) {{
+                        marker.classList.add('active');
+                    }}
+                }});
+
                 const rect = bar.getBoundingClientRect();
                 tooltip.innerHTML = `
                     <strong>${{item.name}}</strong><br>
@@ -833,6 +863,16 @@ def generate_html(result: AnalysisResult) -> str:
             }});
 
             bar.addEventListener('mouseleave', () => {{
+                // Remove highlight from related bars
+                document.querySelectorAll('.timeline-bar.related').forEach(b => {{
+                    b.classList.remove('related');
+                }});
+                
+                // Remove highlight from markers
+                document.querySelectorAll('.timeline-marker.active').forEach(m => {{
+                    m.classList.remove('active');
+                }});
+
                 hideTimeout = setTimeout(() => {{
                     tooltip.classList.remove('tooltip-visible');
                 }}, 300);
@@ -857,12 +897,23 @@ def generate_html(result: AnalysisResult) -> str:
             
             marker.className = `timeline-marker ${{isAligned ? 'aligned' : ''}}`;
             marker.style.left = `${{calculatePosition(ts)}}%`;
+            marker.dataset.ts = ts;
             
             marker.addEventListener('mouseenter', (e) => {{
                 e.preventDefault();
                 e.stopPropagation();
                 if (hideTimeout) clearTimeout(hideTimeout);
                 
+                // Highlight related bars
+                const allBars = document.querySelectorAll('.timeline-bar');
+                allBars.forEach(b => {{
+                    const bStart = b.dataset.start;
+                    const bEnd = b.dataset.end;
+                    if (bStart == ts || bEnd == ts) {{
+                        b.classList.add('related');
+                    }}
+                }});
+
                 const rect = marker.getBoundingClientRect();
                 
                 // Build tooltip content
@@ -877,6 +928,11 @@ def generate_html(result: AnalysisResult) -> str:
             }});
 
             marker.addEventListener('mouseleave', () => {{
+                // Remove highlight from related bars
+                document.querySelectorAll('.timeline-bar.related').forEach(b => {{
+                    b.classList.remove('related');
+                }});
+
                 hideTimeout = setTimeout(() => {{
                     tooltip.classList.remove('tooltip-visible');
                 }}, 300);

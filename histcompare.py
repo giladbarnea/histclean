@@ -468,7 +468,7 @@ def generate_html(result: AnalysisResult) -> str:
     for hf in result.files:
         if hf.start_ts and hf.end_ts:
             js_data.append(
-                f'{{ name: "{hf.name}", start: {hf.start_ts}, end: {hf.end_ts}, '
+                f'{{ name: "{hf.name}", path: "{hf.path.resolve()}", start: {hf.start_ts}, end: {hf.end_ts}, '
                 f'lines: {hf.lines}, type: "{hf.category}" }}'
             )
 
@@ -500,7 +500,7 @@ def generate_html(result: AnalysisResult) -> str:
             <p><strong>Best recovery source:</strong> <code>{largest.name}</code> ({largest.lines:,} lines)</p>
         """
 
-    return f'''<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -573,6 +573,36 @@ def generate_html(result: AnalysisResult) -> str:
             z-index: 10;
             transform: scaleY(1.15);
         }}
+        .overlay-container {{
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 350px;
+            right: 0;
+            pointer-events: none;
+            z-index: 20;
+        }}
+        .timeline-marker {{
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateX(-50%);
+            pointer-events: auto;
+            transition: width 0.1s, background 0.1s;
+        }}
+        .timeline-marker.aligned {{
+            background: rgba(0, 255, 0, 0.5);
+            width: 1px;
+            z-index: 30;
+        }}
+        .timeline-marker:hover {{
+            background: #fff;
+            width: 2px;
+            z-index: 40;
+            box-shadow: 0 0 4px rgba(255,255,255,0.5);
+        }}
         .cat-main {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border: 2px solid #8b9aff;
@@ -603,6 +633,7 @@ def generate_html(result: AnalysisResult) -> str:
             font-size: 11px;
             color: #999;
             white-space: nowrap;
+            transform: translateX(-50%);
         }}
         .tooltip {{
             position: fixed;
@@ -611,7 +642,8 @@ def generate_html(result: AnalysisResult) -> str:
             padding: 12px 16px;
             border-radius: 6px;
             font-size: 12px;
-            pointer-events: none;
+            font-size: 12px;
+            pointer-events: auto;
             z-index: 1000;
             display: none;
             box-shadow: 0 4px 12px rgba(0,0,0,0.5);
@@ -716,6 +748,34 @@ def generate_html(result: AnalysisResult) -> str:
 
         const timeline = document.getElementById('timeline');
         const tooltip = document.getElementById('tooltip');
+        let hideTimeout;
+
+        tooltip.addEventListener('mouseenter', () => {{
+            if (hideTimeout) clearTimeout(hideTimeout);
+        }});
+
+        tooltip.addEventListener('mouseleave', () => {{
+            tooltip.classList.remove('tooltip-visible');
+        }});
+
+        tooltip.addEventListener('mouseleave', () => {{
+            tooltip.classList.remove('tooltip-visible');
+        }});
+
+        // Create overlay for global markers
+        const overlay = document.createElement('div');
+        overlay.className = 'overlay-container';
+        timeline.appendChild(overlay);
+
+        // Build alignment map for start/end points
+        const points = {{}};
+        data.forEach(d => {{
+            if (!points[d.start]) points[d.start] = [];
+            points[d.start].push({{name: d.name, type: '[start]'}});
+            
+            if (!points[d.end]) points[d.end] = [];
+            points[d.end].push({{name: d.name, type: '[end]'}});
+        }});
 
         const sortedData = [...data].sort((a, b) => {{
             if (a.type === 'main') return -1;
@@ -749,10 +809,19 @@ def generate_html(result: AnalysisResult) -> str:
             const durationDays = Math.round((item.end - item.start) / 86400);
             bar.textContent = `${{durationDays}}d`;
 
+            // Click to open in Cursor
+            bar.addEventListener('click', (e) => {{
+                // Use cursor://file/absolute/path
+                window.location.href = `cursor://file${{item.path}}`;
+            }});
+
+            // Bar tooltip
             bar.addEventListener('mouseenter', (e) => {{
+                if (hideTimeout) clearTimeout(hideTimeout);
                 const rect = bar.getBoundingClientRect();
                 tooltip.innerHTML = `
                     <strong>${{item.name}}</strong><br>
+                    <span style="font-family: monospace; font-size: 10px; color: #aaa">${{item.path}}</span><br>
                     Start: ${{formatDateTime(item.start)}}<br>
                     End: ${{formatDateTime(item.end)}}<br>
                     Duration: ${{durationDays}} days<br>
@@ -764,13 +833,56 @@ def generate_html(result: AnalysisResult) -> str:
             }});
 
             bar.addEventListener('mouseleave', () => {{
-                tooltip.classList.remove('tooltip-visible');
+                hideTimeout = setTimeout(() => {{
+                    tooltip.classList.remove('tooltip-visible');
+                }}, 300);
             }});
+
+            track.appendChild(bar);
 
             track.appendChild(bar);
             row.appendChild(label);
             row.appendChild(track);
             timeline.appendChild(row);
+        }});
+
+        // Generate global vertical markers
+        Object.keys(points).forEach(ts => {{
+            const marker = document.createElement('div');
+            const isAligned = points[ts].length > 1;
+            
+            // Only show aligned markers or specific ones if too many? 
+            // User requested "each beginning/end of a block had a 1px-wide vertical line"
+            // We'll render all, but aligned ones get special class
+            
+            marker.className = `timeline-marker ${{isAligned ? 'aligned' : ''}}`;
+            marker.style.left = `${{calculatePosition(ts)}}%`;
+            
+            marker.addEventListener('mouseenter', (e) => {{
+                e.preventDefault();
+                e.stopPropagation();
+                if (hideTimeout) clearTimeout(hideTimeout);
+                
+                const rect = marker.getBoundingClientRect();
+                
+                // Build tooltip content
+                const shared = points[ts];
+                let html = shared.map(s => `${{s.name}} ${{s.type}}`).join('<br>');
+                html += `<br><br><span style="color: #aaa">${{formatDateTime(ts)}}</span>`;
+                
+                tooltip.innerHTML = html;
+                tooltip.style.left = `${{rect.left + 10}}px`;
+                tooltip.style.top = `${{rect.top - 10}}px`; // Slightly offset
+                tooltip.classList.add('tooltip-visible');
+            }});
+
+            marker.addEventListener('mouseleave', () => {{
+                hideTimeout = setTimeout(() => {{
+                    tooltip.classList.remove('tooltip-visible');
+                }}, 300);
+            }});
+
+            overlay.appendChild(marker);
         }});
 
         const dateAxis = document.getElementById('dateAxis');
@@ -785,7 +897,7 @@ def generate_html(result: AnalysisResult) -> str:
         }}
     </script>
 </body>
-</html>'''
+</html>"""
 
 
 def output_html(result: AnalysisResult, path: Path) -> None:

@@ -64,15 +64,31 @@ console = Console(stderr=True)
 
 
 @dataclass
+class Sequence:
+    """A continuous sequence of history entries."""
+
+    start_ts: int
+    end_ts: int
+    count: int = 0
+
+
+@dataclass
 class HistoryFile:
-    """Represents a history file with its metadata and time range."""
+    """Represents a history file with its metadata and time sequences."""
 
     path: Path
     name: str
-    start_ts: int | None = None
-    end_ts: int | None = None
+    sequences: list[Sequence] = field(default_factory=list)
     lines: int = 0
     error: str | None = None
+
+    @property
+    def start_ts(self) -> int | None:
+        return self.sequences[0].start_ts if self.sequences else None
+
+    @property
+    def end_ts(self) -> int | None:
+        return self.sequences[-1].end_ts if self.sequences else None
 
     @property
     def start_date(self) -> datetime | None:
@@ -176,52 +192,48 @@ def extract_timestamp(line: str) -> int | None:
     return None
 
 
-def read_first_line(path: Path) -> str | None:
-    """Read only the first line of a file."""
+def scan_file(path: Path) -> tuple[list[Sequence], int]:
+    """Scan file to extract sequences and total line count."""
+    timestamps = []
+    line_count = 0
+
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
-            return f.readline().rstrip("\n")
+            for line in f:
+                line_count += 1
+                ts = extract_timestamp(line)
+                if ts:
+                    timestamps.append(ts)
     except OSError:
-        return None
+        return [], 0
 
+    if not timestamps:
+        return [], line_count
 
-def read_last_line(path: Path) -> str | None:
-    """Read only the last line of a file efficiently."""
-    try:
-        with path.open("rb") as f:
-            # Seek to end
-            f.seek(0, 2)
-            size = f.tell()
-            if size == 0:
-                return None
+    timestamps.sort()
 
-            # Read backwards to find last newline
-            pos = size - 1
-            while pos > 0:
-                f.seek(pos)
-                char = f.read(1)
-                if char == b"\n" and pos < size - 1:
-                    break
-                pos -= 1
+    sequences = []
+    GAP_THRESHOLD = 1 * 86400  # 1 day
 
-            # Read from there to end
-            if pos > 0:
-                f.seek(pos + 1)
-            else:
-                f.seek(0)
+    curr_start = timestamps[0]
+    curr_end = timestamps[0]
+    curr_count = 1
 
-            return f.read().decode("utf-8", errors="replace").rstrip("\n")
-    except OSError:
-        return None
+    for ts in timestamps[1:]:
+        if ts - curr_end >= GAP_THRESHOLD:
+            # End current sequence
+            sequences.append(Sequence(curr_start, curr_end, curr_count))
+            # Start new
+            curr_start = ts
+            curr_count = 0
 
+        curr_end = ts
+        curr_count += 1
 
-def count_lines(path: Path) -> int:
-    """Count lines in file efficiently."""
-    try:
-        with path.open("rb") as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
+    # Append final sequence
+    sequences.append(Sequence(curr_start, curr_end, curr_count))
+
+    return sequences, line_count
 
 
 def analyze_file(path: Path) -> HistoryFile:
@@ -232,17 +244,11 @@ def analyze_file(path: Path) -> HistoryFile:
         hf.error = "File not found"
         return hf
 
-    first = read_first_line(path)
-    last = read_last_line(path)
+    sequences, lines = scan_file(path)
+    hf.sequences = sequences
+    hf.lines = lines
 
-    if first:
-        hf.start_ts = extract_timestamp(first)
-    if last:
-        hf.end_ts = extract_timestamp(last)
-
-    hf.lines = count_lines(path)
-
-    if not hf.start_ts and not hf.end_ts:
+    if not hf.sequences:
         hf.error = "No valid timestamps found"
 
     return hf
@@ -330,27 +336,46 @@ def render_ascii_timeline(result: AnalysisResult, width: int = 60) -> Panel:
     time_range = result.time_range
 
     lines = []
+    lines = []
     for hf in result.files:
-        if hf.start_ts is None or hf.end_ts is None:
+        if not hf.sequences:
             continue
 
-        # Calculate positions
-        start_pos = int(((hf.start_ts - min_ts) / time_range) * width)
-        end_pos = int(((hf.end_ts - min_ts) / time_range) * width)
-        bar_width = max(1, end_pos - start_pos)
-
-        # Build the bar
+        # Build one line for the file
         color = category_color(hf.category)
-        prefix = " " * start_pos
-        bar = "█" * bar_width
+        prefix_len = 0
+
+        # We start with empty bar string and fill it based on sequences
+        # But constructing string by index is hard because of multi-char bar "█".
+        # Better: create an array of " " of length width, then fill ranges.
+        chart_chars = [" "] * width
+
+        for seq in hf.sequences:
+            start_pos = int(((seq.start_ts - min_ts) / time_range) * width)
+            end_pos = int(((seq.end_ts - min_ts) / time_range) * width)
+
+            # Clamp
+            start_pos = max(0, min(start_pos, width - 1))
+            end_pos = max(0, min(end_pos, width - 1))
+
+            # Ensure at least 1 char if there is a sequence
+            if start_pos == end_pos:
+                chart_chars[start_pos] = "█"
+            else:
+                for i in range(start_pos, end_pos + 1):
+                    chart_chars[i] = "█"
 
         # Truncate name for display
         name = hf.name[:35].ljust(35)
 
         line = Text()
         line.append(f"{name} ", style="dim")
-        line.append(prefix)
-        line.append(bar, style=color)
+
+        # We need to construct the bar string with potential color changes if we wanted multiple colors
+        # But here it's monotonic color per file.
+        bar_str = "".join(chart_chars)
+        line.append(bar_str, style=color)
+
         lines.append(line)
 
     # Add date axis
@@ -472,10 +497,21 @@ def generate_html(result: AnalysisResult) -> str:
     # Prepare data for JavaScript
     js_data = []
     for hf in result.files:
-        if hf.start_ts and hf.end_ts:
+        if hf.sequences:
+            # Serialize sequences
+            seqs_js = (
+                "["
+                + ", ".join(
+                    f"{{start: {s.start_ts}, end: {s.end_ts}, count: {s.count}}}"
+                    for s in hf.sequences
+                )
+                + "]"
+            )
+
             js_data.append(
-                f'{{ name: "{hf.name}", path: "{hf.path.resolve()}", start: {hf.start_ts}, end: {hf.end_ts}, '
-                f'lines: {hf.lines}, type: "{hf.category}" }}'
+                f'{{ name: "{hf.name}", path: "{hf.path.resolve()}", '
+                f"start: {hf.start_ts}, end: {hf.end_ts}, "
+                f'lines: {hf.lines}, type: "{hf.category}", sequences: {seqs_js} }}'
             )
 
     data_js = ",\n            ".join(js_data)
@@ -810,14 +846,24 @@ def generate_html(result: AnalysisResult) -> str:
         overlay.className = 'overlay-container';
         timeline.appendChild(overlay);
 
-        // Build alignment map for start/end points
+        // Build alignment map for start/end points of ALL sequences
         const points = {{}};
         data.forEach(d => {{
-            if (!points[d.start]) points[d.start] = [];
-            points[d.start].push({{name: d.name, type: '[start]'}});
-            
-            if (!points[d.end]) points[d.end] = [];
-            points[d.end].push({{name: d.name, type: '[end]'}});
+            if (d.sequences) {{
+                d.sequences.forEach(seq => {{
+                    if (!points[seq.start]) points[seq.start] = [];
+                    points[seq.start].push({{name: d.name, type: '[start]'}});
+                    
+                    if (!points[seq.end]) points[seq.end] = [];
+                    points[seq.end].push({{name: d.name, type: '[end]'}});
+                }});
+            }} else {{
+                // Fallback (for safety)
+                if (!points[d.start]) points[d.start] = [];
+                points[d.start].push({{name: d.name, type: '[start]'}});
+                if (!points[d.end]) points[d.end] = [];
+                points[d.end].push({{name: d.name, type: '[end]'}});
+            }}
         }});
 
         const sortedData = [...data].sort((a, b) => {{
@@ -839,83 +885,87 @@ def generate_html(result: AnalysisResult) -> str:
 
             const track = document.createElement('div');
             track.className = 'timeline-track';
+            
+            const seqs = item.sequences && item.sequences.length > 0 
+                ? item.sequences 
+                : [{{start: item.start, end: item.end, count: item.lines}}];
 
-            const bar = document.createElement('div');
-            bar.className = `timeline-bar cat-${{item.type}}`;
+            seqs.forEach(seq => {{
+                const bar = document.createElement('div');
+                bar.className = `timeline-bar cat-${{item.type}}`;
 
-            const left = calculatePosition(item.start);
-            const width = calculatePosition(item.end) - left;
+                const left = calculatePosition(seq.start);
+                const width = calculatePosition(seq.end) - left;
 
-            bar.style.left = `${{left}}%`;
-            bar.style.width = `${{width}}%`;
-            bar.dataset.start = item.start;
-            bar.dataset.end = item.end;
+                bar.style.left = `${{left}}%`;
+                bar.style.width = `${{width}}%`;
+                bar.dataset.start = seq.start;
+                bar.dataset.end = seq.end;
 
-            const durationDays = Math.round((item.end - item.start) / 86400);
-            bar.textContent = `${{durationDays}}d`;
-
-            // Click to open in Cursor
-            bar.addEventListener('click', (e) => {{
-                // Use cursor://file/absolute/path
-                window.location.href = `cursor://file${{item.path}}`;
-            }});
-
-            // Bar tooltip
-            bar.addEventListener('mouseenter', (e) => {{
-                if (hideTimeout) clearTimeout(hideTimeout);
+                const durationDays = Math.max(1, Math.round((seq.end - seq.start) / 86400));
                 
-                // Highlight related bars
-                const allBars = document.querySelectorAll('.timeline-bar');
-                allBars.forEach(b => {{
-                    if (b === bar) return;
-                    const bStart = parseInt(b.dataset.start);
-                    const bEnd = parseInt(b.dataset.end);
-                    if (bStart === item.start || bStart === item.end || bEnd === item.start || bEnd === item.end) {{
-                        b.classList.add('related');
-                    }}
+                // Show text if roughly wide enough (e.g., > 20px)
+                // We don't have px width here easily, check duration
+                bar.textContent = durationDays > 5 ? `${{durationDays}}d` : '';
+
+                // Click to open in Cursor
+                bar.addEventListener('click', (e) => {{
+                    window.location.href = `cursor://file${{item.path}}`;
                 }});
 
-                // Highlight related markers
-                [item.start, item.end].forEach(ts => {{
-                    const marker = document.querySelector(`.timeline-marker[data-ts="${{ts}}"]`);
-                    if (marker && marker.classList.contains('aligned')) {{
-                        marker.classList.add('active');
-                    }}
+                // Bar tooltip
+                bar.addEventListener('mouseenter', (e) => {{
+                    if (hideTimeout) clearTimeout(hideTimeout);
+                    
+                    // Highlight related bars
+                    const allBars = document.querySelectorAll('.timeline-bar');
+                    allBars.forEach(b => {{
+                        if (b === bar) return;
+                        const bStart = parseInt(b.dataset.start);
+                        const bEnd = parseInt(b.dataset.end);
+                        if (bStart === seq.start || bStart === seq.end || bEnd === seq.start || bEnd === seq.end) {{
+                            b.classList.add('related');
+                        }}
+                    }});
+
+                    // Highlight related markers
+                    [seq.start, seq.end].forEach(ts => {{
+                        const marker = document.querySelector(`.timeline-marker[data-ts="${{ts}}"]`);
+                        if (marker && marker.classList.contains('aligned')) {{
+                            marker.classList.add('active');
+                        }}
+                    }});
+
+                    const rect = bar.getBoundingClientRect();
+                    tooltip.innerHTML = `
+                        <strong>${{item.name}}</strong><br>
+                        <span style="font-family: monospace; font-size: 10px; color: #aaa">${{item.path}}</span><br>
+                        Sequence Start: ${{formatDateTime(seq.start)}}<br>
+                        Sequence End: ${{formatDateTime(seq.end)}}<br>
+                        Seq Duration: ${{durationDays}} days<br>
+                        Seq Events: ${{seq.count ? seq.count.toLocaleString() : 'N/A'}}<hr style="border:0; border-top:1px solid #555; margin:5px 0">
+                        Total Lines: ${{item.lines.toLocaleString()}}
+                    `;
+                    tooltip.style.left = `${{rect.left}}px`;
+                    tooltip.style.top = `${{rect.top - tooltip.offsetHeight - 10}}px`;
+                    tooltip.classList.add('tooltip-visible');
                 }});
 
-                const rect = bar.getBoundingClientRect();
-                tooltip.innerHTML = `
-                    <strong>${{item.name}}</strong><br>
-                    <span style="font-family: monospace; font-size: 10px; color: #aaa">${{item.path}}</span><br>
-                    Start: ${{formatDateTime(item.start)}}<br>
-                    End: ${{formatDateTime(item.end)}}<br>
-                    Duration: ${{durationDays}} days<br>
-                    Lines: ${{item.lines.toLocaleString()}}
-                `;
-                tooltip.style.left = `${{rect.left}}px`;
-                tooltip.style.top = `${{rect.top - tooltip.offsetHeight - 10}}px`;
-                tooltip.classList.add('tooltip-visible');
-            }});
-
-            bar.addEventListener('mouseleave', () => {{
-                // Remove highlight from related bars
-                document.querySelectorAll('.timeline-bar.related').forEach(b => {{
-                    b.classList.remove('related');
+                bar.addEventListener('mouseleave', () => {{
+                    document.querySelectorAll('.timeline-bar.related').forEach(b => {{
+                        b.classList.remove('related');
+                    }});
+                    document.querySelectorAll('.timeline-marker.active').forEach(m => {{
+                        m.classList.remove('active');
+                    }});
+                    hideTimeout = setTimeout(() => {{
+                        tooltip.classList.remove('tooltip-visible');
+                    }}, 300);
                 }});
                 
-                // Remove highlight from markers
-                document.querySelectorAll('.timeline-marker.active').forEach(m => {{
-                    m.classList.remove('active');
-                }});
-
-                hideTimeout = setTimeout(() => {{
-                    tooltip.classList.remove('tooltip-visible');
-                }}, 300);
+                track.appendChild(bar);
             }});
 
-            track.appendChild(bar);
-
-            track.appendChild(bar);
             row.appendChild(label);
             row.appendChild(track);
             timeline.appendChild(row);

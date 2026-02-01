@@ -98,6 +98,9 @@ class HistoryFile:
     lines: int = 0
     error: str | None = None
 
+    def __hash__(self):
+        return hash(self.path)
+
     @property
     def start_ts(self) -> int | None:
         return self.sequences[0].start_ts if self.sequences else None
@@ -135,10 +138,20 @@ class HistoryFile:
 
 
 @dataclass
+class OptimalSegment:
+    """A segment of the optimal history path."""
+
+    start_ts: int
+    end_ts: int
+    file: HistoryFile
+
+
+@dataclass
 class AnalysisResult:
     """Aggregated analysis of all history files."""
 
     files: list[HistoryFile] = field(default_factory=list)
+    optimal_path: list[OptimalSegment] = field(default_factory=list)
 
     @property
     def min_ts(self) -> int | None:
@@ -277,7 +290,98 @@ def analyze_all(paths: Iterable[Path]) -> AnalysisResult:
         result.files.append(analyze_file(p))
     # Sort by start timestamp (files without timestamps go last)
     result.files.sort(key=lambda f: (f.start_ts or float("inf"), f.name))
+
+    # Calculate optimal coverage path
+    result.optimal_path = calculate_optimal_path(result.files)
+
     return result
+
+
+def calculate_optimal_path(files: list[HistoryFile]) -> list[OptimalSegment]:
+    """
+    Calculate the minimal set of files to cover the timeline with maximum coverage.
+    Uses a greedy approach:
+    1. Collect all sequences from all files.
+    2. Sort by start time.
+    3. Iterate through time, always picking the sequence that extends furthest into the future.
+    """
+    # 1. Collect all sequences
+    # Store as (start, end, file)
+    all_seqs = []
+    for hf in files:
+        if not hf.sequences:
+            continue
+        for seq in hf.sequences:
+            all_seqs.append((seq.start_ts, seq.end_ts, hf))
+
+    if not all_seqs:
+        return []
+
+    all_seqs.sort(key=lambda x: (x[0], x[1], x[2].name))
+
+    path = []
+
+    # Range of interest
+    min_ts = all_seqs[0][0]
+    max_ts = max(s[1] for s in all_seqs)
+
+    curr_t = min_ts
+
+    while curr_t < max_ts:
+        # distinct candidates that cover curr_t currently
+        candidates = [s for s in all_seqs if s[0] <= curr_t and s[1] >= curr_t]
+
+        if not candidates:
+            # We are in a gap; jump to next available start
+            future_starts = [s[0] for s in all_seqs if s[0] > curr_t]
+            if not future_starts:
+                break
+            curr_t = min(future_starts)
+            continue
+
+        # Greedy choice: pick candidate that extends furthest
+        # Tie-breaker: prefer current file (stickiness) to avoid fragmentation
+        # Tie-breaker 2: prefer ".zsh_history" (main) if lengths are equal
+
+        # Determine current file from last segment if contiguous
+        last_file = path[-1].file if path and path[-1].end_ts >= curr_t - 1 else None
+
+        best = candidates[0]
+
+        for cand in candidates:
+            # If cand extends significantly further, take it
+            if cand[1] > best[1]:
+                best = cand
+            elif cand[1] == best[1]:
+                # If equal length, prefer stickiness
+                if last_file and cand[2] == last_file:
+                    best = cand
+                # Else if no sticky preference, prefer main file
+                elif cand[2].category == "main":
+                    best = cand
+
+        # We take this file for the range [curr_t, best_end]
+        # BUT, if another file starts later and extends even further,
+        # we might want to switch?
+        # The standard greedy algorithm for "Interval Covering" says:
+        # "Pick the interval that covers curr_t and extends furthest to the right."
+        # This is optimal for minimizing number of intervals.
+
+        # Optimization: Don't just take best[1] as end.
+        # Actually, in standard interval covering, we take the *entire* segment.
+        # So we add (best_file, best_start, best_end).
+        # But here we are constructing a timeline.
+        # We add (best_file, curr_t, best_end).
+
+        # Merge with previous if same file and contiguous
+        if path and path[-1].file == best[2] and path[-1].end_ts >= curr_t - 1:
+            path[-1].end_ts = best[1]
+        else:
+            path.append(OptimalSegment(curr_t, best[1], best[2]))
+
+        curr_t = best[1] + 1
+
+    return path
 
 
 # ============================================================================
@@ -359,7 +463,6 @@ def render_ascii_timeline(result: AnalysisResult, width: int = 60) -> Panel:
 
         # Build one line for the file
         color = category_color(hf.category)
-        prefix_len = 0
 
         # We start with empty bar string and fill it based on sequences
         # But constructing string by index is hard because of multi-char bar "█".
@@ -485,6 +588,23 @@ def render_summary(result: AnalysisResult) -> Panel:
             )
         )
 
+    if result.optimal_path:
+        lines.append(Text(""))
+        lines.append(Text("Optimal Coverage Path:", style="bold green"))
+        for seg in result.optimal_path:
+            duration = max(1, (seg.end_ts - seg.start_ts) // 86400)
+            lines.append(
+                Text.assemble(
+                    ("  • ", "dim"),
+                    (seg.file.name, "cyan"),
+                    (f" ({duration}d)", "dim"),
+                    (" : ", "dim"),
+                    (format_date_short(seg.start_ts), "bold"),
+                    (" → ", "dim"),
+                    (format_date_short(seg.end_ts), "bold"),
+                )
+            )
+
     return Panel(
         "\n".join(str(line) for line in lines),
         title="Summary",
@@ -557,6 +677,31 @@ def generate_html(result: AnalysisResult) -> str:
         recovery_html = f"""
             <p><strong>Best recovery source:</strong> <code>{largest.name}</code> ({largest.lines:,} lines)</p>
         """
+
+    # Prepare optimal path sequences for JS
+    opt_sequences = []
+    for seg in result.optimal_path or []:
+        # Count is roughly lines/time * seg_time? Or just Unknown.
+        # We don't have accurate count per segment unless we intersect sequences.
+        # Just use 0 for count.
+        opt_sequences.append(f"{{start: {seg.start_ts}, end: {seg.end_ts}, count: 0}}")
+
+    opt_seq_js = "[" + ", ".join(opt_sequences) + "]"
+
+    # Add virtual file for optimal path
+    if result.optimal_path:
+        # Calculate total lines roughly?
+        opt_lines = sum(
+            s.file.lines for s in result.optimal_path
+        )  # Overestimation but fine
+
+        opt_entry = (
+            f'{{ name: "✨ Best Recovery Path", path: "", '
+            f"start: {result.optimal_path[0].start_ts}, end: {result.optimal_path[-1].end_ts}, "
+            f'lines: {opt_lines}, type: "optimal", sequences: {opt_seq_js} }}'
+        )
+        # Prepend to data
+        data_js = opt_entry + ",\n            " + data_js
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -686,8 +831,13 @@ def generate_html(result: AnalysisResult) -> str:
         .cat-other {{
             background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
         }}
+        .cat-optimal {{
+            background: linear-gradient(135deg, #ff0844 0%, #ffb199 100%);
+            border: 2px solid #ff4b4b;
+            box-shadow: 0 0 10px rgba(255, 75, 75, 0.3);
+        }}
         .date-axis {{
-            display: flex;“
+            display: flex;
             margin-left: 350px; /* Match label width */
             margin-top: 10px;
             border-top: 2px solid #444;

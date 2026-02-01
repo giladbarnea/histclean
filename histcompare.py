@@ -4,10 +4,30 @@
 # dependencies = ["rich"]
 # ///
 """
-histcompare.py - Compare time ranges across zsh history backups.
+histcompare.py - Visualizer for ZSH history file coverage and gaps.
 
-Analyzes multiple zsh history files to visualize their temporal coverage and
-overlaps. Useful for understanding backup coverage before recovery operations.
+Analyzes multiple ZSH history files (extended_history format) to visualize their temporal
+coverage, overlaps, and gaps.
+
+Key Concepts
+------------
+1. Sequences & Gaps:
+   Unlike simple start/end range checks, this tool fully scans each file to identify
+   continuous "sequences" of history. A gap of > 1 day between entries breaks the sequence.
+   This reveals significantly more detail, such as "hollow" backup files that span years
+   but only contain a few distinct sessions.
+
+2. Time Alignment:
+   The tool identifies exact timestamp matches across files (start/end of sequences),
+   helping to visualize when backups were taken relative to each other.
+
+3. Visualization Modes:
+   - Terminal: Rich-formatted summary table and ASCII timeline (stderr).
+   - HTML: Interactive, scrollable web-based timeline with:
+     * Discontinuous bars representing actual data sequences.
+     * Two-way highlighting: Hovering a file highlights aligned timestamps in other files.
+     * Sticky labels and horizontal scrolling for long histories.
+     * Click-to-open integration with Cursor/VSCode.
 
 Discovery
 ---------
@@ -18,17 +38,13 @@ By default, discovers history files from:
 
 Explicit CLI paths override automatic discovery.
 
-Output Modes
-------------
-  --terminal (default): Rich-formatted table and ASCII timeline to stderr
-  --html FILE:          Generate interactive HTML visualization
-
-Each file is analyzed by reading only its first and last lines to extract
-the timestamp range, making this efficient even for very large files.
+Usage
+-----
+    uv run histcompare.py --html timeline.html
 
 Format
 ------
-Expects EXTENDED_HISTORY format: ": <epoch>:<duration>;command"
+Expects ZSH EXTENDED_HISTORY format: ": <epoch>:<duration>;command"
 """
 
 from __future__ import annotations

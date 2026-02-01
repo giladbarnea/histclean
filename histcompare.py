@@ -405,7 +405,10 @@ def render_summary(result: AnalysisResult) -> Panel:
                     ("⚠️  ", "yellow"),
                     ("Missing history: ", "bold red"),
                     (f"{gap_days} days ", "bold"),
-                    (f"({format_date_short(earliest.start_ts)} → {format_date_short(main.start_ts)})", "dim"),
+                    (
+                        f"({format_date_short(earliest.start_ts)} → {format_date_short(main.start_ts)})",
+                        "dim",
+                    ),
                 )
             )
 
@@ -434,7 +437,10 @@ def render_summary(result: AnalysisResult) -> Panel:
                 ("📅 ", ""),
                 ("Coverage: ", "bold"),
                 (f"{total_days} days ", ""),
-                (f"({format_date_short(result.min_ts)} → {format_date_short(result.max_ts)})", "dim"),
+                (
+                    f"({format_date_short(result.min_ts)} → {format_date_short(result.max_ts)})",
+                    "dim",
+                ),
             )
         )
 
@@ -514,7 +520,7 @@ def generate_html(result: AnalysisResult) -> str:
             color: #e0e0e0;
             padding: 20px;
         }}
-        .container {{ max-width: 1400px; margin: 0 auto; }}
+        .container {{ width: 95%; margin: 0 auto; }}
         h1 {{ font-size: 28px; margin-bottom: 10px; color: #fff; }}
         .summary {{
             background: #2a2a2a;
@@ -629,12 +635,13 @@ def generate_html(result: AnalysisResult) -> str:
             background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
         }}
         .date-axis {{
-            display: flex;
-            margin-left: 370px;
+            display: flex;“
+            margin-left: 350px; /* Match label width */
             margin-top: 10px;
             border-top: 2px solid #444;
             padding-top: 10px;
             position: relative;
+            height: 30px;
         }}
         .date-marker {{
             position: absolute;
@@ -683,6 +690,26 @@ def generate_html(result: AnalysisResult) -> str:
             font-size: 13px;
             color: #aaa;
         }}
+        /* Scrollbar styling */
+        .chart-container::-webkit-scrollbar {{
+            width: 12px;
+            height: 12px;
+        }}
+        .chart-container::-webkit-scrollbar-track {{
+            background: #2a2a2a;
+            border-radius: 8px;
+        }}
+        .chart-container::-webkit-scrollbar-thumb {{
+            background: #555;
+            border-radius: 6px;
+            border: 3px solid #2a2a2a;
+        }}
+        .chart-container::-webkit-scrollbar-thumb:hover {{
+            background: #777;
+        }}
+        .chart-container::-webkit-scrollbar-corner {{
+            background: #2a2a2a;
+        }}
     </style>
 </head>
 <body>
@@ -700,7 +727,7 @@ def generate_html(result: AnalysisResult) -> str:
 
         <div class="chart-container">
             <div class="timeline" id="timeline"></div>
-            <div class="date-axis" id="dateAxis"></div>
+            <!-- dateAxis moved inside timeline via JS -->
 
             <div class="legend">
                 <div class="legend-item">
@@ -758,12 +785,20 @@ def generate_html(result: AnalysisResult) -> str:
         const tooltip = document.getElementById('tooltip');
         let hideTimeout;
 
+        // Dynamic width calculation
+        // Ensure at least 20 pixels per day to avoid squishing and enable comfortable scrolling
+        const MIN_PX_PER_DAY = 20; 
+        const totalDays = timeRange / 86400;
+        const requiredTrackWidth = Math.max(800, totalDays * MIN_PX_PER_DAY);
+        const labelWidth = 350;
+        const totalWidth = labelWidth + requiredTrackWidth;
+
+        timeline.style.minWidth = `${{totalWidth}}px`;
+        // Also set style on the container to ensure flex contents expand?
+        // Actually .timeline width is enough.
+
         tooltip.addEventListener('mouseenter', () => {{
             if (hideTimeout) clearTimeout(hideTimeout);
-        }});
-
-        tooltip.addEventListener('mouseleave', () => {{
-            tooltip.classList.remove('tooltip-visible');
         }});
 
         tooltip.addEventListener('mouseleave', () => {{
@@ -941,8 +976,14 @@ def generate_html(result: AnalysisResult) -> str:
             overlay.appendChild(marker);
         }});
 
-        const dateAxis = document.getElementById('dateAxis');
+        // Create date axis
+        const dateAxis = document.createElement('div');
+        dateAxis.className = 'date-axis';
+        dateAxis.id = 'dateAxis';
+        timeline.appendChild(dateAxis);
+
         const numMarkers = 10;
+        // Or calculate markers based on width? Fixed 10 for now.
         for (let i = 0; i <= numMarkers; i++) {{
             const timestamp = minTime + (timeRange / numMarkers) * i;
             const marker = document.createElement('div');

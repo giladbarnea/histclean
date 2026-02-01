@@ -672,10 +672,26 @@ def generate_html(result: AnalysisResult) -> str:
     backups = [f for f in result.files if f.category != "main" and f.lines > 0]
     largest = max(backups, key=lambda f: f.lines) if backups else None
 
+    # Generate optimal path description
     recovery_html = ""
-    if largest:
+    if result.optimal_path:
+        recovery_html += (
+            "<p><strong>Recommended Recovery Plan (Optimal Path):</strong></p>"
+        )
+        recovery_html += "<ul style='margin-left: 20px; margin-top: 10px; font-family: monospace; font-size: 13px; color: #ccc;'>"
+        for seg in result.optimal_path:
+            duration = max(1, (seg.end_ts - seg.start_ts) // 86400)
+            recovery_html += (
+                f"<li>"
+                f"<span style='color: #888'>{format_date_short(seg.start_ts)} - {format_date_short(seg.end_ts)}</span>"
+                f" <span style='color: #555'>({duration}d)</span>: "
+                f"<span style='color: #4facfe'>{seg.file.name}</span>"
+                f"</li>"
+            )
+        recovery_html += "</ul>"
+    elif largest:
         recovery_html = f"""
-            <p><strong>Best recovery source:</strong> <code>{largest.name}</code> ({largest.lines:,} lines)</p>
+            <p><strong>Best single recovery source:</strong> <code>{largest.name}</code> ({largest.lines:,} lines)</p>
         """
 
     # Prepare optimal path sequences for JS

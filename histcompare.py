@@ -685,10 +685,21 @@ def generate_html(result: AnalysisResult) -> str:
                 f"<li>"
                 f"<span style='color: #888'>{format_date_short(seg.start_ts)} - {format_date_short(seg.end_ts)}</span>"
                 f" <span style='color: #555'>({duration}d)</span>: "
-                f"<span style='color: #4facfe'>{seg.file.name}</span>"
+                f"<span class='recovery-source' data-path='{seg.file.path.resolve()}' style='color: #4facfe; cursor: pointer; transition: all 0.2s; border-bottom: 1px dashed transparent;'>{seg.file.name}</span>"
                 f"</li>"
             )
         recovery_html += "</ul>"
+
+        # Add style for recovery-source hover
+        recovery_html += """
+        <style>
+            .recovery-source:hover {
+                color: #fff !important;
+                border-bottom: 1px dashed #fff !important;
+                text-shadow: 0 0 8px rgba(79, 172, 254, 0.6);
+            }
+        </style>
+        """
     elif largest:
         recovery_html = f"""
             <p><strong>Best single recovery source:</strong> <code>{largest.name}</code> ({largest.lines:,} lines)</p>
@@ -700,7 +711,10 @@ def generate_html(result: AnalysisResult) -> str:
         # Count is roughly lines/time * seg_time? Or just Unknown.
         # We don't have accurate count per segment unless we intersect sequences.
         # Just use 0 for count.
-        opt_sequences.append(f"{{start: {seg.start_ts}, end: {seg.end_ts}, count: 0}}")
+        opt_sequences.append(
+            f"{{start: {seg.start_ts}, end: {seg.end_ts}, count: 0, "
+            f"sourceName: '{seg.file.name}', sourcePath: '{seg.file.path.resolve()}'}}"
+        )
 
     opt_seq_js = "[" + ", ".join(opt_sequences) + "]"
 
@@ -1083,6 +1097,11 @@ def generate_html(result: AnalysisResult) -> str:
                 bar.style.width = `${{width}}%`;
                 bar.dataset.start = seq.start;
                 bar.dataset.end = seq.end;
+                
+                // Store path for cross-referencing
+                const itemPath = seq.sourcePath || item.path;
+                bar.dataset.path = itemPath;
+
 
                 const durationDays = Math.max(1, Math.round((seq.end - seq.start) / 86400));
                 
@@ -1092,7 +1111,7 @@ def generate_html(result: AnalysisResult) -> str:
 
                 // Click to open in Cursor
                 bar.addEventListener('click', (e) => {{
-                    window.location.href = `cursor://file${{item.path}}`;
+                    window.location.href = `cursor://file${{itemPath}}`;
                 }});
 
                 // Bar tooltip
@@ -1119,9 +1138,13 @@ def generate_html(result: AnalysisResult) -> str:
                     }});
 
                     const rect = bar.getBoundingClientRect();
+                    
+                    const title = seq.sourceName ? `Expected Source: ${{seq.sourceName}}` : item.name;
+                    const subtitle = seq.sourcePath || item.path;
+                    
                     tooltip.innerHTML = `
-                        <strong>${{item.name}}</strong><br>
-                        <span style="font-family: monospace; font-size: 10px; color: #aaa">${{item.path}}</span><br>
+                        <strong>${{title}}</strong><br>
+                        <span style="font-family: monospace; font-size: 10px; color: #aaa">${{subtitle}}</span><br>
                         Sequence Start: ${{formatDateTime(seq.start)}}<br>
                         Sequence End: ${{formatDateTime(seq.end)}}<br>
                         Seq Duration: ${{durationDays}} days<br>
@@ -1151,6 +1174,27 @@ def generate_html(result: AnalysisResult) -> str:
             row.appendChild(label);
             row.appendChild(track);
             timeline.appendChild(row);
+        }});
+        
+        // Link recovery list items to bars
+        document.querySelectorAll('.recovery-source').forEach(el => {{
+            el.addEventListener('mouseenter', () => {{
+                const path = el.dataset.path;
+                if (!path) return;
+                
+                document.querySelectorAll(`.timeline-bar`).forEach(bar => {{
+                    if (bar.dataset.path === path) {{
+                        bar.classList.add('related');
+                        // Optional: scroll into view?
+                    }}
+                }});
+            }});
+            
+            el.addEventListener('mouseleave', () => {{
+                 document.querySelectorAll('.timeline-bar.related').forEach(b => {{
+                    b.classList.remove('related');
+                }});
+            }});
         }});
 
         // Generate global vertical markers

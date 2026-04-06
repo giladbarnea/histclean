@@ -43,9 +43,6 @@ Let's say you want to add a feature to flag commands longer than 200 characters.
 
 That's it. Notice you didn't have to touch the complex merging, display, or removal logic—or modify the Textual UI to support your new flag type. You just created a new, self-contained component and plugged it in; the interactive review will automatically render and allow toggling your new flags.
 
-## Known Issues
-
-1. When entries are merged into a cluster, the last entry is always kept, even if it should also be flagged individually for removal. This is a bug in the merge logic. For example, if lines 1–4 a flagged as a cluster, line 4 is kept by design. But if line 4 is multiline, it would be removed if it stood alone. Because it’s in part of a cluster, it bypasses the individual multiline flag and is incorrectly kept. This dynamic is generally true (not limited to any specific strategy.)
 """
 
 # ============================================================================
@@ -54,15 +51,18 @@ That's it. Notice you didn't have to touch the complex merging, display, or remo
 
 from __future__ import annotations
 
+import argparse
 import difflib
 import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Iterator
 
+from history_files import discover_history_files
 from pygments.lexer import RegexLexer, bygroups, include
 from pygments.token import (
     Comment,
@@ -332,6 +332,25 @@ CONFIG = Config()
 # ============================================================================
 # DATA STRUCTURES
 # ============================================================================
+
+
+@dataclass
+class HistoryAnalysis:
+    original_lines: list[str]
+    all_entries: list[list[str]]
+    flagged_entries: list[BaseFlag]
+
+    @property
+    def is_clean(self) -> bool:
+        return not self.flagged_entries
+
+
+@dataclass
+class HistoryCheckResult:
+    path: Path
+    is_clean: bool
+    flagged_count: int = 0
+    error: str | None = None
 
 
 class BaseFlag(ABC):
@@ -839,21 +858,25 @@ def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
                 current_cluster = next_cluster
         merged_clusters.append(current_cluster)
 
-    # 3. Filter out other flags that are now inside a merged cluster
+    # 3. Filter out other flags that are now removed by a merged cluster
     final_flags: list[BaseFlag] = list(merged_clusters)
-    cluster_indices = set()
+    cluster_removed_indices = set()
     for cluster in merged_clusters:
-        cluster_indices.update(cluster.get_all_covered_indices())
+        cluster_removed_indices.update(cluster.get_indices_to_remove())
+
+    kept_individual_indices = {
+        index for index in individual_flags if index not in cluster_removed_indices
+    }
 
     for index, individual_flag in individual_flags.items():
-        if index not in cluster_indices:
+        if index in kept_individual_indices:
             final_flags.append(individual_flag)
 
     for dup_flag in duplicate_flags:
         valid_indices = [
             i
             for i in dup_flag.entry_indices
-            if i not in cluster_indices and i not in individual_flags
+            if i not in cluster_removed_indices and i not in kept_individual_indices
         ]
         if len(valid_indices) > 1:
             dup_flag.entry_indices = valid_indices
@@ -975,7 +998,7 @@ def backup_and_write_history(
     history_path: Path, cleaned_lines: list[str], original_lines: list[str]
 ) -> None:
     """→ File I/O: Saves a backup and writes the new cleaned history file"""
-    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S_%f")
     backup_filename = history_path.parent / f".zsh_hist.clean.{timestamp}"
     try:
         with backup_filename.open("w", encoding="utf-8") as f:
@@ -1086,35 +1109,26 @@ class HistoryCleanApp(App[list[BaseFlag]]):
         self.exit([])
 
 
-def main() -> None:
-    """→ Main: Orchestrates the entire cleaning pipeline"""
-    if len(sys.argv) > 1:
-        history_file_path = Path(sys.argv[1])
-    else:
-        history_file_path = Path.home() / ".zsh_history"
-
-    original_lines = read_history_file(history_file_path)
-    if original_lines is None:
-        sys.exit(1)
+def analyze_history_lines(original_lines: list[str]) -> HistoryAnalysis:
+    """Build the cleaning plan without mutating the history file."""
     if not [line for line in original_lines if line.strip()]:
-        _console_print(
-            "[warning]History file is empty, or made of only empty lines. Nothing to clean.[/warning]"
+        return HistoryAnalysis(
+            original_lines=original_lines,
+            all_entries=[],
+            flagged_entries=[],
         )
-        return
 
     all_entries_with_lines = list(parse_history_entries(original_lines))
     all_entries = [block for _, block in all_entries_with_lines]
     entry_line_nums = [line_num for line_num, _ in all_entries_with_lines]
     max_line_num_width = len(str(len(original_lines)))
 
-    # --- Common data for all flag instances ---
     flag_context = {
         "all_entries": all_entries,
         "entry_line_nums": entry_line_nums,
         "max_line_num_width": max_line_num_width,
     }
 
-    # --- Declarative pipeline definition ---
     pipeline_steps = [
         {
             "flag_class": IndividualFlag,
@@ -1136,87 +1150,221 @@ def main() -> None:
         "reason": "Duplicate command; keeping the last instance",
     })
 
-    # --- PHASE 1: COLLECT ---
     raw_flagged_entries: list[BaseFlag] = []
     for step in pipeline_steps:
-        FlagClass = step["flag_class"]
+        flag_class = step["flag_class"]
         strategy = step["strategy"]
         reason = step.get("reason", "")
 
         for result in strategy(all_entries):
-            # The structure of `result` depends on the strategy
-            if FlagClass is IndividualFlag:
+            if flag_class is IndividualFlag:
                 index, single_reason = result
-                # We group reasons later in merge, so start with a list
                 flag = IndividualFlag(entry_index=index, reasons=[single_reason], **flag_context)
-            elif FlagClass is ClusterFlag:
+            elif flag_class is ClusterFlag:
                 start, end = result
                 flag = ClusterFlag(
-                    start_index=start, end_index=end, reason_text=reason, **flag_context
+                    start_index=start,
+                    end_index=end,
+                    reason_text=reason,
+                    **flag_context,
                 )
-            elif FlagClass is DuplicateFlag:
+            elif flag_class is DuplicateFlag:
                 indices = result
-                flag = DuplicateFlag(entry_indices=indices, reason_text=reason, **flag_context)
+                flag = DuplicateFlag(
+                    entry_indices=indices,
+                    reason_text=reason,
+                    **flag_context,
+                )
             else:
                 continue
             raw_flagged_entries.append(flag)
 
-    # --- PHASE 2: MERGE & FILTER ---
     merged_flagged_entries = merge_flagged_entries(raw_flagged_entries)
     final_flagged_entries = filter_flags_by_hist_keep(merged_flagged_entries, all_entries)
+    return HistoryAnalysis(
+        original_lines=original_lines,
+        all_entries=all_entries,
+        flagged_entries=final_flagged_entries,
+    )
 
-    if not final_flagged_entries:
+
+def inspect_history_file(history_path: Path) -> HistoryCheckResult:
+    original_lines = read_history_file(history_path)
+    if original_lines is None:
+        return HistoryCheckResult(
+            path=history_path,
+            is_clean=False,
+            error=f"Could not read '{history_path}'",
+        )
+
+    analysis = analyze_history_lines(original_lines)
+    return HistoryCheckResult(
+        path=history_path,
+        is_clean=analysis.is_clean,
+        flagged_count=len(analysis.flagged_entries),
+    )
+
+
+def inspect_history_files(paths: Iterable[Path]) -> list[HistoryCheckResult]:
+    return [inspect_history_file(path) for path in paths]
+
+
+def check(paths: Iterable[Path] | None = None, *, verbose: bool = True) -> bool:
+    """Return True only when every selected history file is already clean."""
+    history_paths = list(paths) if paths is not None else discover_history_files()
+    if not history_paths:
+        if verbose:
+            _console_print("[error]No history files found.[/error]")
+        return False
+
+    results = inspect_history_files(history_paths)
+    all_clean = True
+    for result in results:
+        if result.error:
+            all_clean = False
+            if verbose:
+                _console_print(f"[error]{result.error}[/error]")
+            continue
+        if result.is_clean:
+            if verbose:
+                _console_print(f"[success]{result.path} is clean.[/success]")
+            continue
+        all_clean = False
+        if verbose:
+            _console_print(
+                f"[warning]{result.path} is not clean ({result.flagged_count} pending change(s)).[/warning]"
+            )
+
+    if verbose:
+        if all_clean:
+            _console_print("[success]All selected history files are clean.[/success]")
+        else:
+            _console_print("[warning]One or more selected history files are not clean.[/warning]")
+
+    return all_clean
+
+
+def clean_history_file(history_file_path: Path) -> bool:
+    """Clean one history file and return True only if it is clean afterward."""
+    original_lines = read_history_file(history_file_path)
+    if original_lines is None:
+        return False
+    if not [line for line in original_lines if line.strip()]:
+        _console_print(
+            "[warning]History file is empty, or made of only empty lines. Nothing to clean.[/warning]"
+        )
+        return True
+
+    analysis = analyze_history_lines(original_lines)
+    if analysis.is_clean:
         _console_print("[success]No entries needed cleaning. History file unchanged.[/success]")
-        return
+        return True
 
-    # --- PHASE 3: CONFIRM & APPLY ---
-    app = HistoryCleanApp(final_flagged_entries)
+    app = HistoryCleanApp(analysis.flagged_entries)
     approved_flags = app.run() or []
 
     if not approved_flags:
         _console_print("[warning]No changes applied. History file unchanged.[/warning]")
-        return
+        return False
 
-    indices_to_remove = calculate_indices_to_remove(approved_flags, all_entries)
-
-    # Build the final list of entries by keeping those not in the removal set.
+    indices_to_remove = calculate_indices_to_remove(approved_flags, analysis.all_entries)
     final_cleaned_entries = [
-        entry for i, entry in enumerate(all_entries) if i not in indices_to_remove
+        entry for i, entry in enumerate(analysis.all_entries) if i not in indices_to_remove
     ]
 
-    if len(all_entries) == len(final_cleaned_entries):
+    if len(analysis.all_entries) == len(final_cleaned_entries):
         _console_print(
             "\n[warning]Approval given, but no entries were ultimately removed. History file unchanged.[/warning]"
         )
-        return
+        return False
 
     cleaned_lines = [line for entry in final_cleaned_entries for line in entry]
-
     backup_and_write_history(history_file_path, cleaned_lines, original_lines)
 
-    # For stats, flatten both entries lists to list[str]
     all_entries_flat: list[bytes] = [
-        line.encode("utf-8", errors="ignore") for entry in all_entries for line in entry
+        line.encode("utf-8", errors="ignore")
+        for entry in analysis.all_entries
+        for line in entry
     ]
     final_cleaned_entries_flat: list[bytes] = [
-        line.encode("utf-8", errors="ignore") for entry in final_cleaned_entries for line in entry
+        line.encode("utf-8", errors="ignore")
+        for entry in final_cleaned_entries
+        for line in entry
     ]
-    # calculate how many raw lines were removed
-    raw_lines_removed: int = len(all_entries_flat) - len(final_cleaned_entries_flat)
-    raw_lines_removed_formatted: str = f"{raw_lines_removed / len(all_entries_flat) * 100:.2f}%"
+    raw_lines_removed = len(all_entries_flat) - len(final_cleaned_entries_flat)
+    raw_lines_removed_formatted = f"{raw_lines_removed / len(all_entries_flat) * 100:.2f}%"
 
-    # Use memoryview to calculate total bytes removed
-    all_entries_bytes: int = memoryview(b"\n".join(all_entries_flat)).nbytes
-    final_cleaned_entries_bytes: int = memoryview(b"\n".join(final_cleaned_entries_flat)).nbytes
-    total_bytes_removed: int = all_entries_bytes - final_cleaned_entries_bytes
-    total_bytes_removed_formatted: str = f"{total_bytes_removed / all_entries_bytes * 100:.2f}%"
+    all_entries_bytes = memoryview(b"\n".join(all_entries_flat)).nbytes
+    final_cleaned_entries_bytes = memoryview(b"\n".join(final_cleaned_entries_flat)).nbytes
+    total_bytes_removed = all_entries_bytes - final_cleaned_entries_bytes
+    total_bytes_removed_formatted = f"{total_bytes_removed / all_entries_bytes * 100:.2f}%"
 
-    removed_count: int = len(all_entries) - len(final_cleaned_entries)
-    removed_percentage_formatted: str = f"{removed_count / len(all_entries) * 100:.2f}%"
+    removed_count = len(analysis.all_entries) - len(final_cleaned_entries)
+    removed_percentage_formatted = f"{removed_count / len(analysis.all_entries) * 100:.2f}%"
     _console_print(
         f"[success]Cleaned history: removed {removed_count} entries ({removed_percentage_formatted}), {raw_lines_removed} lines ({raw_lines_removed_formatted}), {total_bytes_removed} bytes ({total_bytes_removed_formatted}).[/success]"
     )
 
+    post_clean_analysis = analyze_history_lines(cleaned_lines)
+    if post_clean_analysis.is_clean:
+        return True
+
+    _console_print(
+        "[warning]History still needs cleaning after this pass. Run histclean again or review the remaining flags.[/warning]"
+    )
+    return False
+
+
+def clean(paths: Iterable[Path] | None = None) -> bool:
+    """Clean all selected history files and return True only if all are clean afterward."""
+    history_paths = list(paths) if paths is not None else discover_history_files()
+    if not history_paths:
+        _console_print("[error]No history files found.[/error]")
+        return False
+
+    all_clean = True
+    multiple_files = len(history_paths) > 1
+    for index, history_path in enumerate(history_paths, start=1):
+        if multiple_files:
+            _console_print()
+            _console_print(
+                Rule(
+                    f"[bold]History File {index}/{len(history_paths)}: {history_path}[/bold]",
+                    style="rule",
+                )
+            )
+        elif index == 1:
+            _console_print(Rule(f"[bold]{history_path}[/bold]", style="rule"))
+
+        if not clean_history_file(history_path):
+            all_clean = False
+
+    return all_clean
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Clean zsh history files.")
+    parser.add_argument(
+        "files",
+        nargs="*",
+        help="Files to inspect or clean. Defaults to discovered history files.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check whether the selected history files are already clean.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """→ Main: Orchestrates history checking and cleaning."""
+    args = build_arg_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    history_paths = discover_history_files(args.files)
+    if args.check:
+        return 0 if check(history_paths) else 1
+    return 0 if clean(history_paths) else 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

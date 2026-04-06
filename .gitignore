@@ -8,3 +8,5 @@ textual-docs/*.mp4
 
 .gemini/
 gha-creds-*.json
+
+*.html

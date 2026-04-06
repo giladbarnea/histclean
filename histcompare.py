@@ -1,7 +1,7 @@
 #!/usr/bin/env uv run
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["rich"]
+# dependencies = ["rich", "textual", "pygments"]
 # ///
 """
 histcompare.py - Visualizer for ZSH history file coverage and gaps.
@@ -31,10 +31,12 @@ Key Concepts
 
 Discovery
 ---------
-By default, discovers history files from:
-  - CWD: .zsh_history, .zsh_history.*, .zsh_hist.clean.*
-  - HOME: same patterns
-  - HOME/.zsh_history_backups/: numeric timestamp-named files
+By default, uses the same discovery as histmerge/histclean:
+  - numeric ".zsh_history.*" snapshots in CWD and HOME
+  - numeric files in HOME/.zsh_history_backups/
+  - the live ".zsh_history" if present
+
+`.zsh_hist.clean.*` files are only included when passed explicitly on the CLI.
 
 Explicit CLI paths override automatic discovery.
 
@@ -57,6 +59,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from history_files import discover_history_files
+from histclean import inspect_history_files
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -68,8 +72,6 @@ from rich.text import Text
 # ============================================================================
 
 EXT_LINE_RE = re.compile(r"^:\s*(\d+):\d+;")
-SNAP_RE = re.compile(r"^\.zsh_history\.(?:shrinkbackup\.)?(\d+)$")
-CLEAN_RE = re.compile(r"^\.zsh_hist\.clean\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
 
 console = Console(stderr=True)
 
@@ -152,6 +154,7 @@ class AnalysisResult:
 
     files: list[HistoryFile] = field(default_factory=list)
     optimal_path: list[OptimalSegment] = field(default_factory=list)
+    dirty_file_count: int = 0
 
     @property
     def min_ts(self) -> int | None:
@@ -175,34 +178,9 @@ class AnalysisResult:
 # ============================================================================
 
 
-def discover_files() -> list[Path]:
-    """Find all history-related files in standard locations."""
-    found: set[Path] = set()
-    home = Path.home()
-    cwd = Path.cwd()
-
-    search_dirs = {home, cwd}
-
-    for d in search_dirs:
-        # Main history file
-        main = d / ".zsh_history"
-        if main.exists() and main.is_file():
-            found.add(main.resolve())
-
-        # Glob patterns for backups
-        for pattern in [".zsh_history.*", ".zsh_hist.clean.*"]:
-            for p in d.glob(pattern):
-                if p.is_file():
-                    found.add(p.resolve())
-
-    # Check .zsh_history_backups directory
-    backups_dir = home / ".zsh_history_backups"
-    if backups_dir.is_dir():
-        for p in backups_dir.iterdir():
-            if p.is_file() and p.name.isdigit():
-                found.add(p.resolve())
-
-    return sorted(found, key=lambda p: (p.parent.name, p.name))
+def discover_files(*, cwd: Path | None = None, home: Path | None = None) -> list[Path]:
+    """Find the same default history files histmerge would consider."""
+    return discover_history_files(cwd=cwd, home=home)
 
 
 # ============================================================================
@@ -541,6 +519,18 @@ def render_summary(result: AnalysisResult) -> Panel:
 
     lines = []
 
+    if result.dirty_file_count:
+        lines.append(
+            Text.assemble(
+                ("Note: ", "bold yellow"),
+                (
+                    "one or more selected history files are not clean; optimal timeline may change after cleaning.",
+                    "yellow",
+                ),
+            )
+        )
+        lines.append(Text(""))
+
     if main and earliest and main.start_ts and earliest.start_ts:
         gap_days = (main.start_ts - earliest.start_ts) // 86400
         if gap_days > 0:
@@ -659,6 +649,12 @@ def generate_html(result: AnalysisResult) -> str:
         key=lambda f: f.start_ts,
         default=None,
     )
+
+    cleanliness_note_html = ""
+    if result.dirty_file_count:
+        cleanliness_note_html = """
+            <p><strong>Note:</strong> one or more selected history files are not clean; optimal timeline may change after cleaning.</p>
+        """
 
     gap_html = ""
     if main and earliest and main.start_ts and earliest.start_ts:
@@ -950,6 +946,7 @@ def generate_html(result: AnalysisResult) -> str:
 
         <div class="summary">
             <h2>Analysis Results</h2>
+            {cleanliness_note_html}
             {gap_html}
             {recovery_html}
             <div class="stats">
@@ -972,7 +969,7 @@ def generate_html(result: AnalysisResult) -> str:
                 </div>
                 <div class="legend-item">
                     <div class="legend-color cat-clean"></div>
-                    <span>.zsh_hist.clean.*</span>
+                    <span>Explicit .zsh_hist.clean.*</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color cat-snapshot"></div>
@@ -1317,10 +1314,15 @@ def main(argv: list[str] | None = None) -> int:
         if not paths:
             console.print("[red]No history files found[/red]")
             return 1
-        console.print(f"[dim]Discovered {len(paths)} history files[/dim]")
+        console.print(
+            f"[dim]Discovered {len(paths)} history files using histmerge-compatible defaults[/dim]"
+        )
 
     # Analyze
     result = analyze_all(paths)
+    result.dirty_file_count = sum(
+        1 for check_result in inspect_history_files(paths) if not check_result.is_clean
+    )
 
     # Output
     if not args.no_terminal:

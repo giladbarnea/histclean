@@ -37,29 +37,4 @@ sessions:
     prominent_tech_stack: [textual]
     updated_when_message_count_was: 15
 
-  # Jan 14 26
-  cafe2981-9ec9-4cc2-aeed-b264fce19981:
-    description: "Mapped Reports and Alerts event_id traceability requirements, identified existing propagation gaps, implemented a new integration test, full successful Flow run."
-    keywords: [reports, alerts, event_id, traceability]
-    custom_title: "reports and alerts event_id traceability requirements"
-    prominent_tech_stack: [mongodb, langgraph]
-    updated_when_message_count_was: 17
-    edited_files: [tests/test_services/test_scheduled_report_service.py, tests/test_services/test_alerts_service.py]
-    branch: tommy-log-request-id-VLLM-405
-    jira_issue_id: VLLM-405
-    forked: 047570d2-51ac-4a31-b02c-db55ce98193a
-
-  # Jan 13 25
-  047570d2-51ac-4a31-b02c-db55ce98193a:
-    description: "Researched what other features are 'like' Signals in both projects"
-    directories: [~/dev/reflection_agent, ~/dev/mega_agent_core_lib]
-    keywords: [signals]
-    prominent_tech_stack: []
-    updated_when_message_count_was: 8
-    new_files: []
-    edited_files: []
-    branch: null
-    jira_issue_id: null
-    forked: null
-
 ignored: [dda16bd3-68fa-4cc9-86b5-fb6e6a532b41]

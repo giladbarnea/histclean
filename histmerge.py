@@ -28,6 +28,8 @@ Behavior
 - Parses EXTENDED_HISTORY lines and sorts the union by timestamp (stable by
   arrival order for equal timestamps).
 - Writes the merged union lines to stdout only.
+- With "--dry-run", skips writing the merged union to stdout and only reports
+  what would be merged via stderr stats.
 - Prints progress and per-file stats to stderr (raw, unique_in_file,
   newly_contributed, cumulative_union), plus a final union summary. This lets
   you redirect stdout/stderr independently.
@@ -123,6 +125,11 @@ def main(argv: list[str]) -> int:
         description="Merge-sort zsh history snapshots; emit union to stdout; stats to stderr"
     )
     parser.add_argument("files", nargs="*", help="Files to include (overrides default discovery)")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect and summarize the merge without writing the merged union to stdout.",
+    )
     args = parser.parse_args(argv)
 
     paths = discover_history_files(args.files)
@@ -190,6 +197,11 @@ def main(argv: list[str]) -> int:
         pct = (total_unique / total_raw) * 100.0
         print(f"duplicates_removed={removed}", file=sys.stderr)
         print(f"unique_ratio={pct:.2f}%", file=sys.stderr)
+
+    if args.dry_run:
+        print("dry_run=true", file=sys.stderr)
+        print("merged output suppressed", file=sys.stderr)
+        return 0
 
     union_records.sort(key=lambda record: (record[0], record[1]))
     try:

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
-
 
 SNAP_RE = re.compile(r"^\.zsh_history\.(?:shrinkbackup\.)?(\d+)$")
 BACKUP_RE = re.compile(r"^\d+$")
-CLEAN_RE = re.compile(r"^\.zsh_hist\.clean\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:_\d{6})?$")
+CLEAN_RE = re.compile(
+    r"^\.zsh_hist\.clean\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:_\d{6})?$"
+)
 
 
 def detect_sort_key(path: Path) -> tuple[int, str]:
@@ -40,22 +41,14 @@ def discover_history_files(
         from glob import glob as _glob
 
         snapshot_matches = {
-            Path(match)
-            for match in _glob(str(cwd / ".zsh_history.*"))
-        } | {
-            Path(match)
-            for match in _glob(str(home / ".zsh_history.*"))
-        }
+            Path(match) for match in _glob(str(cwd / ".zsh_history.*"))
+        } | {Path(match) for match in _glob(str(home / ".zsh_history.*"))}
         paths = [path for path in snapshot_matches if SNAP_RE.match(path.name)]
 
         if include_clean_outputs:
             clean_matches = {
-                Path(match)
-                for match in _glob(str(cwd / ".zsh_hist.clean.*"))
-            } | {
-                Path(match)
-                for match in _glob(str(home / ".zsh_hist.clean.*"))
-            }
+                Path(match) for match in _glob(str(cwd / ".zsh_hist.clean.*"))
+            } | {Path(match) for match in _glob(str(home / ".zsh_hist.clean.*"))}
             paths.extend(path for path in clean_matches if CLEAN_RE.match(path.name))
 
         backups_dir = home / ".zsh_history_backups"

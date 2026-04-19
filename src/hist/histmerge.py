@@ -1,11 +1,3 @@
-#!/usr/bin/env uv run
-# /// script
-# dependencies = [
-#     "textual",
-#     "rich",
-#     "pygments"
-# ]
-# ///
 """
 Merge-sort zsh history snapshots and emit the union.
 
@@ -45,14 +37,12 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
-from history_files import discover_history_files
-from histclean import HistoryCheckResult
-from histclean import clean as clean_histories
-from histclean import console, inspect_history_files
-
+from .histclean import HistoryCheckResult, console, inspect_history_files
+from .histclean import clean as clean_histories
+from .history_files import discover_history_files
 
 EXT_LINE_RE = re.compile(r"^:\s*(\d+)\:(\d+)\;.*")
 
@@ -97,7 +87,9 @@ def ensure_histories_are_clean(paths: list[Path]) -> bool:
 
     while True:
         dirty_results = [
-            result for result in inspect_history_files(existing_paths) if not result.is_clean
+            result
+            for result in inspect_history_files(existing_paths)
+            if not result.is_clean
         ]
         if not dirty_results:
             console.print(
@@ -120,17 +112,19 @@ def ensure_histories_are_clean(paths: list[Path]) -> bool:
         clean_histories([result.path for result in dirty_results])
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Merge-sort zsh history snapshots; emit union to stdout; stats to stderr"
     )
-    parser.add_argument("files", nargs="*", help="Files to include (overrides default discovery)")
+    parser.add_argument(
+        "files", nargs="*", help="Files to include (overrides default discovery)"
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect and summarize the merge without writing the merged union to stdout.",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     paths = discover_history_files(args.files)
     if not paths:
@@ -166,7 +160,10 @@ def main(argv: list[str]) -> int:
                 continue
             match = EXT_LINE_RE.match(line)
             if not match:
-                print(f"{path.name}: skipped non-extended-history line: {line}", file=sys.stderr)
+                print(
+                    f"{path.name}: skipped non-extended-history line: {line}",
+                    file=sys.stderr,
+                )
                 continue
             try:
                 timestamp = int(match.group(1))
@@ -218,4 +215,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main())

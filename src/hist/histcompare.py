@@ -1,8 +1,3 @@
-#!/usr/bin/env uv run
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["rich", "textual", "pygments"]
-# ///
 """
 histcompare.py - Visualizer for ZSH history file coverage and gaps.
 
@@ -42,7 +37,7 @@ Explicit CLI paths override automatic discovery.
 
 Usage
 -----
-    uv run histcompare.py --html timeline.html
+    uv run histcompare --html timeline.html
 
 Format
 ------
@@ -54,18 +49,19 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
-from history_files import discover_history_files
-from histclean import inspect_history_files
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+from .histclean import inspect_history_files
+from .history_files import discover_history_files
 
 # ============================================================================
 # CONSTANTS & PATTERNS
@@ -332,10 +328,7 @@ def calculate_optimal_path(files: list[HistoryFile]) -> list[OptimalSegment]:
                 best = cand
             elif cand[1] == best[1]:
                 # If equal length, prefer stickiness
-                if last_file and cand[2] == last_file:
-                    best = cand
-                # Else if no sticky preference, prefer main file
-                elif cand[2].category == "main":
+                if last_file and cand[2] == last_file or cand[2].category == "main":
                     best = cand
 
         # We take this file for the range [curr_t, best_end]

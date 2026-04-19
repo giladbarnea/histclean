@@ -1,0 +1,20 @@
+[project]
+name = "hist"
+version = "0.1.0"
+description = "Zsh history hygiene tools"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pygments>=2.20.0",
+    "rich>=15.0.0",
+    "textual>=8.2.4",
+]
+
+[project.scripts]
+histclean = "hist.histclean:main"
+histmerge = "hist.histmerge:main"
+histcompare = "hist.histcompare:main"
+
+[build-system]
+requires = ["uv_build>=0.11.5,<0.12.0"]
+build-backend = "uv_build"

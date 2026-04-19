@@ -1,11 +1,3 @@
-#!/usr/bin/env uv run
-# /// script
-# dependencies = [
-#     "textual",
-#     "rich",
-#     "pygments"
-# ]
-# ///
 """
 histclean.py - Zsh history cleaning utility
 
@@ -57,12 +49,11 @@ import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
 
-from history_files import discover_history_files
 from pygments.lexer import RegexLexer, bygroups, include
 from pygments.token import (
     Comment,
@@ -94,9 +85,11 @@ from textual.containers import VerticalScroll
 from textual.events import Focus
 from textual.widgets import Footer, Header, Static
 
+from .history_files import discover_history_files
+
 
 class NonScrollableVerticalScroll(VerticalScroll):
-    BINDINGS = [
+    BINDINGS = [  # noqa: RUF012
         b
         for b in VerticalScroll.BINDINGS
         if b.key not in ["up", "down", "pageup", "pagedown", "home", "end"]
@@ -388,11 +381,17 @@ class BaseFlag(ABC):
         raise NotImplementedError
 
     def _format_line(
-        self, table: Table, entry_idx: int, content_renderable: RichText | Syntax, marker: str = " "
+        self,
+        table: Table,
+        entry_idx: int,
+        content_renderable: RichText | Syntax,
+        marker: str = " ",
     ):
         line_num = self.entry_line_nums[entry_idx] + 1
         line_num_str = f"{line_num}"
-        marker_text = RichText(marker, style=f"diff.{'plus' if marker == '+' else 'minus'}")
+        marker_text = RichText(
+            marker, style=f"diff.{'plus' if marker == '+' else 'minus'}"
+        )
         table.add_row(line_num_str, marker_text, content_renderable)
 
 
@@ -483,7 +482,9 @@ class ClusterFlag(BaseFlag):
         meta_table.add_row("Reason:", self.reason_text)
         meta_table.add_row(
             "Action:",
-            RichText("Keep only the last entry in the sequence", style="italic #61AFEF"),
+            RichText(
+                "Keep only the last entry in the sequence", style="italic #61AFEF"
+            ),
         )
 
         entries_table = Table.grid(padding=(0, 1))
@@ -554,7 +555,9 @@ class DuplicateFlag(BaseFlag):
         meta_table.add_row("Reason:", self.reason_text)
         meta_table.add_row(
             "Action:",
-            RichText("Keep only the last entry in the sequence", style="italic #61AFEF"),
+            RichText(
+                "Keep only the last entry in the sequence", style="italic #61AFEF"
+            ),
         )
 
         entries_table = Table.grid(padding=(0, 1))
@@ -598,9 +601,11 @@ def _console_print(string="", *args, **kwargs) -> None:
     """→ Safe console printing with fallback"""
     try:
         console.print(string, *args, **kwargs)
-    except Exception:
+    except Exception:  # noqa: BLE001
         kwargs.setdefault("file", sys.stderr)
-        kwargs_clean = {k: v for k, v in kwargs.items() if k not in ["sep", "file", "end", "flush"]}
+        kwargs_clean = {
+            k: v for k, v in kwargs.items() if k not in ["sep", "file", "end", "flush"]
+        }
         print(string, *args, **kwargs_clean)
 
 
@@ -645,7 +650,9 @@ def _ask_yes_no(prompt_text: str) -> bool:
 # ============================================================================
 
 
-def flag_individual_multiline(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+def flag_individual_multiline(
+    all_entries: list[list[str]],
+) -> Iterator[tuple[int, str]]:
     """→ Individual strategy: Flags multi-line entries"""
     for i, entry_block in enumerate(all_entries):
         if len(entry_block) > 1:
@@ -660,26 +667,33 @@ def flag_individual_empty(all_entries: list[list[str]]) -> Iterator[tuple[int, s
             yield i, "It is an empty entry."
 
 
-def flag_individual_blacklist(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+def flag_individual_blacklist(
+    all_entries: list[list[str]],
+) -> Iterator[tuple[int, str]]:
     """→ Individual strategy: Flags entries matching blacklist patterns"""
     for i, entry_block in enumerate(all_entries):
         command = remove_timestamp_from_entry(entry_block)
-        if match := next((pattern.search(command) for pattern in BLACKLIST_PATTERNS), None):
+        if match := next(
+            (pattern.search(command) for pattern in BLACKLIST_PATTERNS), None
+        ):
             yield i, f"Matches '{match.group()}'"
 
 
-def flag_individual_orphaned_backslash(all_entries: list[list[str]]) -> Iterator[tuple[int, str]]:
+def flag_individual_orphaned_backslash(
+    all_entries: list[list[str]],
+) -> Iterator[tuple[int, str]]:
     """→ Individual strategy: Flags entries ending with backslash that don't continue to next line"""
     for i, entry_block in enumerate(all_entries):
         command = remove_timestamp_from_entry(entry_block)
         # Check if command ends with backslash
-        if command.rstrip().endswith("\\"):
-            # Check if there's a next entry
-            if i + 1 < len(all_entries):
-                next_entry_block = all_entries[i + 1]
-                # If next entry starts with timestamp pattern, this backslash is orphaned
-                if next_entry_block and HISTORY_ENTRY_RE.match(next_entry_block[0]):
-                    yield i, "Entry ends with orphaned backslash (line continuation not found)"
+        if command.rstrip().endswith("\\") and i + 1 < len(all_entries):
+            next_entry_block = all_entries[i + 1]
+            # If next entry starts with timestamp pattern, this backslash is orphaned
+            if next_entry_block and HISTORY_ENTRY_RE.match(next_entry_block[0]):
+                yield (
+                    i,
+                    "Entry ends with orphaned backslash (line continuation not found)",
+                )
 
 
 def flag_duplicate_groups(all_entries: list[list[str]]) -> Iterator[list[int]]:
@@ -748,7 +762,9 @@ def are_commands_similar_difflib(cmd1: str, cmd2: str) -> bool:
 # ============================================================================
 
 
-def flag_cluster_jaccard_similarity(all_entries: list[list[str]]) -> Iterator[tuple[int, int]]:
+def flag_cluster_jaccard_similarity(
+    all_entries: list[list[str]],
+) -> Iterator[tuple[int, int]]:
     """→ Cluster strategy: Groups similar commands using Jaccard similarity with lookahead"""
     commands = [remove_timestamp_from_entry(entry).strip() for entry in all_entries]
     if len(commands) < 2:
@@ -769,8 +785,9 @@ def flag_cluster_jaccard_similarity(all_entries: list[list[str]]) -> Iterator[tu
                     is_similar_to_cluster = True
                     break
             if is_similar_to_cluster:
-                for k in range(last_successful_match_j + 1, j + 1):
-                    current_cluster_indices.append(k)
+                current_cluster_indices.extend(
+                    range(last_successful_match_j + 1, j + 1)
+                )
                 last_successful_match_j = j
         if len(current_cluster_indices) > 1:
             start_index = current_cluster_indices[0]
@@ -781,7 +798,9 @@ def flag_cluster_jaccard_similarity(all_entries: list[list[str]]) -> Iterator[tu
             i += 1
 
 
-def flag_cluster_difflib_similarity(all_entries: list[list[str]]) -> Iterator[tuple[int, int]]:
+def flag_cluster_difflib_similarity(
+    all_entries: list[list[str]],
+) -> Iterator[tuple[int, int]]:
     """→ Cluster strategy: Groups similar commands using simple adjacent-pair difflib checks"""
     commands = [remove_timestamp_from_entry(entry).strip() for entry in all_entries]
     if len(commands) < 2:
@@ -850,7 +869,9 @@ def merge_flagged_entries(flagged_entries: list[BaseFlag]) -> list[BaseFlag]:
         current_cluster = cluster_flags[0]
         for next_cluster in cluster_flags[1:]:
             if next_cluster.start_index <= current_cluster.end_index + 1:
-                current_cluster.end_index = max(current_cluster.end_index, next_cluster.end_index)
+                current_cluster.end_index = max(
+                    current_cluster.end_index, next_cluster.end_index
+                )
                 if next_cluster.reason_text not in current_cluster.reason_text:
                     current_cluster.reason_text += f" / {next_cluster.reason_text}"
             else:
@@ -923,7 +944,9 @@ def filter_flags_by_hist_keep(
 
         elif isinstance(flag, DuplicateFlag):
             # Remove HIST:KEEP entries from the duplicate list, but keep the last entry
-            non_hist_keep_indices = [i for i in flag.entry_indices if not has_hist_keep(i)]
+            non_hist_keep_indices = [
+                i for i in flag.entry_indices if not has_hist_keep(i)
+            ]
 
             # If we still have duplicates after filtering, keep the flag with updated indices
             if len(non_hist_keep_indices) > 1:
@@ -950,7 +973,9 @@ def calculate_indices_to_remove(
             if not re.search(r"#\s*!keep\b", command, re.IGNORECASE):
                 filtered_indices.add(index)
         else:
-            filtered_indices.add(index)  # Keep invalid indices for error handling elsewhere
+            filtered_indices.add(
+                index
+            )  # Keep invalid indices for error handling elsewhere
 
     return filtered_indices
 
@@ -970,7 +995,9 @@ def display_and_confirm_all_changes(flagged_entries: list[BaseFlag]) -> bool:
 
     for i, entry in enumerate(flagged_entries, 1):
         _console_print()
-        _console_print(Rule(f"Change {i} of {num_changes}", style="rule", characters="─"))
+        _console_print(
+            Rule(f"Change {i} of {num_changes}", style="rule", characters="─")
+        )
         _console_print(entry.render())
 
     console.print()
@@ -987,9 +1014,11 @@ def read_history_file(file_path: Path) -> list[str] | None:
     try:
         return file_path.read_text(errors="ignore").splitlines()
     except FileNotFoundError:
-        _console_print(f"[error]Error: History file not found at '{file_path}'[/error]\n")
+        _console_print(
+            f"[error]Error: History file not found at '{file_path}'[/error]\n"
+        )
         return None
-    except IOError as e:
+    except OSError as e:
         _console_print(f"[error]Error reading file '{file_path}': {e}[/error]\n")
         return None
 
@@ -1004,16 +1033,20 @@ def backup_and_write_history(
         with backup_filename.open("w", encoding="utf-8") as f:
             f.write("\n".join(original_lines) + "\n")
         _console_print(f"Backup saved to [info]{backup_filename}[/info]\n")
-    except IOError as e:
-        _console_print(f"[error]Error writing to backup file {backup_filename}: {e!r}[/error]\n")
+    except OSError as e:
+        _console_print(
+            f"[error]Error writing to backup file {backup_filename}: {e!r}[/error]\n"
+        )
         # Do not exit, we can still try to write the main file
 
     try:
         with history_path.open("w", encoding="utf-8") as f:
             f.write("\n".join(cleaned_lines) + "\n")
         _console_print(f"Cleaned history saved to [success]{history_path}[/success]\n")
-    except IOError as e:
-        _console_print(f"[error]Error writing to history file {history_path}: {e!r}[/error]\n")
+    except OSError as e:
+        _console_print(
+            f"[error]Error writing to history file {history_path}: {e!r}[/error]\n"
+        )
         sys.exit(1)
 
 
@@ -1040,9 +1073,11 @@ class HistoryCleanApp(App[list[BaseFlag]]):
         self.flagged_entries = flagged_entries
         self.panels: list[FocusableStatic] = []
         self.scroll_container: VerticalScroll | None = None
-        self.flag_states: dict[BaseFlag, bool] = {flag: True for flag in flagged_entries}
+        self.flag_states: dict[BaseFlag, bool] = {
+            flag: True for flag in flagged_entries
+        }
 
-    BINDINGS = [
+    BINDINGS = [  # noqa: RUF012
         Binding("up", "focus_previous_panel", "Focus previous panel", priority=True),
         Binding("down", "focus_next_panel", "Focus next panel", priority=True),
         Binding("space", "toggle_panel", "Toggle panel"),
@@ -1159,7 +1194,9 @@ def analyze_history_lines(original_lines: list[str]) -> HistoryAnalysis:
         for result in strategy(all_entries):
             if flag_class is IndividualFlag:
                 index, single_reason = result
-                flag = IndividualFlag(entry_index=index, reasons=[single_reason], **flag_context)
+                flag = IndividualFlag(
+                    entry_index=index, reasons=[single_reason], **flag_context
+                )
             elif flag_class is ClusterFlag:
                 start, end = result
                 flag = ClusterFlag(
@@ -1180,7 +1217,9 @@ def analyze_history_lines(original_lines: list[str]) -> HistoryAnalysis:
             raw_flagged_entries.append(flag)
 
     merged_flagged_entries = merge_flagged_entries(raw_flagged_entries)
-    final_flagged_entries = filter_flags_by_hist_keep(merged_flagged_entries, all_entries)
+    final_flagged_entries = filter_flags_by_hist_keep(
+        merged_flagged_entries, all_entries
+    )
     return HistoryAnalysis(
         original_lines=original_lines,
         all_entries=all_entries,
@@ -1239,7 +1278,9 @@ def check(paths: Iterable[Path] | None = None, *, verbose: bool = True) -> bool:
         if all_clean:
             _console_print("[success]All selected history files are clean.[/success]")
         else:
-            _console_print("[warning]One or more selected history files are not clean.[/warning]")
+            _console_print(
+                "[warning]One or more selected history files are not clean.[/warning]"
+            )
 
     return all_clean
 
@@ -1257,7 +1298,9 @@ def clean_history_file(history_file_path: Path) -> bool:
 
     analysis = analyze_history_lines(original_lines)
     if analysis.is_clean:
-        _console_print("[success]No entries needed cleaning. History file unchanged.[/success]")
+        _console_print(
+            "[success]No entries needed cleaning. History file unchanged.[/success]"
+        )
         return True
 
     app = HistoryCleanApp(analysis.flagged_entries)
@@ -1267,9 +1310,13 @@ def clean_history_file(history_file_path: Path) -> bool:
         _console_print("[warning]No changes applied. History file unchanged.[/warning]")
         return False
 
-    indices_to_remove = calculate_indices_to_remove(approved_flags, analysis.all_entries)
+    indices_to_remove = calculate_indices_to_remove(
+        approved_flags, analysis.all_entries
+    )
     final_cleaned_entries = [
-        entry for i, entry in enumerate(analysis.all_entries) if i not in indices_to_remove
+        entry
+        for i, entry in enumerate(analysis.all_entries)
+        if i not in indices_to_remove
     ]
 
     if len(analysis.all_entries) == len(final_cleaned_entries):
@@ -1292,15 +1339,23 @@ def clean_history_file(history_file_path: Path) -> bool:
         for line in entry
     ]
     raw_lines_removed = len(all_entries_flat) - len(final_cleaned_entries_flat)
-    raw_lines_removed_formatted = f"{raw_lines_removed / len(all_entries_flat) * 100:.2f}%"
+    raw_lines_removed_formatted = (
+        f"{raw_lines_removed / len(all_entries_flat) * 100:.2f}%"
+    )
 
     all_entries_bytes = memoryview(b"\n".join(all_entries_flat)).nbytes
-    final_cleaned_entries_bytes = memoryview(b"\n".join(final_cleaned_entries_flat)).nbytes
+    final_cleaned_entries_bytes = memoryview(
+        b"\n".join(final_cleaned_entries_flat)
+    ).nbytes
     total_bytes_removed = all_entries_bytes - final_cleaned_entries_bytes
-    total_bytes_removed_formatted = f"{total_bytes_removed / all_entries_bytes * 100:.2f}%"
+    total_bytes_removed_formatted = (
+        f"{total_bytes_removed / all_entries_bytes * 100:.2f}%"
+    )
 
     removed_count = len(analysis.all_entries) - len(final_cleaned_entries)
-    removed_percentage_formatted = f"{removed_count / len(analysis.all_entries) * 100:.2f}%"
+    removed_percentage_formatted = (
+        f"{removed_count / len(analysis.all_entries) * 100:.2f}%"
+    )
     _console_print(
         f"[success]Cleaned history: removed {removed_count} entries ({removed_percentage_formatted}), {raw_lines_removed} lines ({raw_lines_removed_formatted}), {total_bytes_removed} bytes ({total_bytes_removed_formatted}).[/success]"
     )

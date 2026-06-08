@@ -2,10 +2,14 @@
 Merge-sort zsh history snapshots and emit the union.
 
 Discovery
-- Uses histclean's shared discovery, which includes:
+- Uses histclean's shared discovery, which includes by default:
   - numeric ".zsh_history.*" snapshots in CWD and HOME
   - numeric files in "~/.zsh_history_backups/"
   - the live ".zsh_history" if present
+- With "--all", discovery also includes:
+  - ".zsh_hist.clean.*" outputs
+  - non-numeric ".zsh_history.*" files such as merged/prevsnapshot variants
+  - "*.zsh_history" files such as PID-suffixed snapshots
 - Explicit CLI paths override discovery.
 
 Safety
@@ -120,13 +124,18 @@ def main(argv: list[str] | None = None) -> int:
         "files", nargs="*", help="Files to include (overrides default discovery)"
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Expand automatic discovery to include clean outputs and other history-like files.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect and summarize the merge without writing the merged union to stdout.",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    paths = discover_history_files(args.files)
+    paths = discover_history_files(args.files, include_all=args.all)
     if not paths:
         console.print("[error]No history files found.[/error]")
         return 1

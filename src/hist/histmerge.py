@@ -26,6 +26,8 @@ Behavior
 - Writes the merged union lines to stdout only.
 - With "--dry-run", skips writing the merged union to stdout and only reports
   what would be merged via stderr stats.
+- With "--cleanup", removes the initially selected source files after the merged
+  union reaches stdout, while preserving every live ".zsh_history" file.
 - Prints progress and per-file stats to stderr (raw, unique_in_file,
   newly_contributed, cumulative_union), plus a final union summary. This lets
   you redirect stdout/stderr independently.
@@ -83,6 +85,31 @@ def _prompt_dirty_action() -> str:
         print("Please type c, r, or q.", file=sys.stderr)
 
 
+def remove_merged_source_files(paths: Iterable[Path]) -> None:
+    """Remove merged backup sources while preserving live history files."""
+    removable_paths = [
+        path for path in paths if path.exists() and path.name != ".zsh_history"
+    ]
+    backup_directories = {
+        path.parent
+        for path in removable_paths
+        if path.parent.name == ".zsh_history_backups"
+    }
+
+    print("Cleanup:", file=sys.stderr)
+    for path in removable_paths:
+        path.unlink()
+        print(f"- removed {path}", file=sys.stderr)
+
+    for directory in sorted(backup_directories):
+        if any(directory.iterdir()):
+            continue
+        directory.rmdir()
+        print(f"- removed empty directory {directory}", file=sys.stderr)
+
+    print(f"files_removed={len(removable_paths)}", file=sys.stderr)
+
+
 def ensure_histories_are_clean(paths: list[Path]) -> bool:
     existing_paths = [path for path in paths if path.exists()]
     if not existing_paths:
@@ -128,10 +155,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Expand automatic discovery to include clean outputs and other history-like files.",
     )
-    parser.add_argument(
+    output_actions = parser.add_mutually_exclusive_group()
+    output_actions.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect and summarize the merge without writing the merged union to stdout.",
+    )
+    output_actions.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Remove selected backup sources after successfully writing the merged union.",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
@@ -220,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
         return 0
+
+    if args.cleanup:
+        remove_merged_source_files(paths)
     return 0
 
 
